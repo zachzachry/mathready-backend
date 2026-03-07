@@ -1,12 +1,6 @@
 """
 MathReady GA — Backend Server
 FastAPI + JSON file persistence
-
-Run with:
-    pip install fastapi uvicorn
-    python main.py
-
-Server starts at http://localhost:8000
 """
 
 from fastapi import FastAPI, HTTPException
@@ -25,27 +19,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── File-based persistence ─────────────────────────────────────────
+# ── File-based persistence ─────────────────────────────────
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 def _path(name): return os.path.join(DATA_DIR, name)
-
 def _load(filename, default):
     try:
         with open(_path(filename)) as f: return json.load(f)
     except: return default
-
 def _save(filename, data):
     with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
 
-# ── In-memory state (backed by files) ─────────────────────────────
-sessions    = _load("sessions.json",    {})
-heartbeats  = {}
-question_bank = _load("questions.json", [])
+# ── State ──────────────────────────────────────────────────
+sessions      = _load("sessions.json",    {})
+heartbeats    = {}
+question_bank = _load("questions.json",   [])
 active_test   = _load("active_test.json", {"questions": [], "title": "Practice Test"})
+saved_tests   = _load("saved_tests.json", [])
 
-# ── Data models ────────────────────────────────────────────────────
-
+# ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
     name:      str
     score:     int
@@ -74,14 +66,22 @@ class ActiveTest(BaseModel):
     questions: List[Any]
     title:     Optional[str] = "Practice Test"
 
-# ── Health ─────────────────────────────────────────────────────────
+class SavedTest(BaseModel):
+    name:      str
+    questions: List[Any]
+    title:     Optional[str] = ""
 
+# ── Health ─────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "MathReady GA server is running ✓", "questions": len(question_bank), "active": len(active_test.get("questions", []))}
+    return {
+        "status": "MathReady GA server is running ✓",
+        "questions": len(question_bank),
+        "active": len(active_test.get("questions", [])),
+        "saved_tests": len(saved_tests),
+    }
 
-# ── Sessions ───────────────────────────────────────────────────────
-
+# ── Sessions ───────────────────────────────────────────────
 @app.post("/submit")
 def submit_session(session: Session):
     sessions[session.name] = session.dict()
@@ -94,8 +94,7 @@ def get_sessions():
 
 @app.delete("/sessions")
 def clear_sessions():
-    sessions.clear()
-    heartbeats.clear()
+    sessions.clear(); heartbeats.clear()
     _save("sessions.json", sessions)
     return {"ok": True}
 
@@ -105,7 +104,7 @@ def post_heartbeat(hb: Heartbeat):
     return {"ok": True}
 
 @app.get("/active")
-def get_active():
+def get_active_students():
     now = time.time()
     return [
         {"name": n, "current_question": d["current_question"],
@@ -114,8 +113,7 @@ def get_active():
         for n, d in heartbeats.items() if now - d["last_ping"] < 60
     ]
 
-# ── Question Bank ──────────────────────────────────────────────────
-
+# ── Question Bank ──────────────────────────────────────────
 @app.get("/questions")
 def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
     qs = question_bank
@@ -126,10 +124,8 @@ def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
 @app.post("/questions")
 def save_question(q: Question):
     data = q.dict()
-    # Assign a new ID if not provided
     if not data.get("id"):
         data["id"] = "q" + uuid.uuid4().hex[:8]
-    # Update if ID already exists, otherwise append
     existing = next((i for i,x in enumerate(question_bank) if x.get("id")==data["id"]), None)
     if existing is not None:
         question_bank[existing] = data
@@ -144,13 +140,11 @@ def delete_question(qid: str):
     before = len(question_bank)
     question_bank = [q for q in question_bank if q.get("id") != qid]
     _save("questions.json", question_bank)
-    # Also remove from active test if present
     active_test["questions"] = [q for q in active_test.get("questions",[]) if q.get("id") != qid]
     _save("active_test.json", active_test)
     return {"ok": True, "removed": before - len(question_bank)}
 
-# ── Active Test ────────────────────────────────────────────────────
-
+# ── Active Test ────────────────────────────────────────────
 @app.get("/test/active")
 def get_active_test():
     return active_test
@@ -162,7 +156,35 @@ def activate_test(test: ActiveTest):
     _save("active_test.json", active_test)
     return {"ok": True, "count": len(active_test["questions"])}
 
-# ── Start ──────────────────────────────────────────────────────────
+# ── Saved Tests ────────────────────────────────────────────
+@app.get("/tests/saved")
+def get_saved_tests():
+    # Return list without full question content for efficiency
+    return [{"id": t["id"], "name": t["name"], "title": t.get("title",""), "count": len(t.get("questions",[])), "saved_at": t.get("saved_at","")} for t in saved_tests]
 
+@app.get("/tests/saved/{tid}")
+def get_saved_test(tid: str):
+    t = next((t for t in saved_tests if t["id"]==tid), None)
+    if not t: raise HTTPException(status_code=404, detail="Test not found")
+    return t
+
+@app.post("/tests/saved")
+def save_test(test: SavedTest):
+    data = test.dict()
+    data["id"]       = "t" + uuid.uuid4().hex[:8]
+    data["saved_at"] = time.strftime("%b %d, %Y %I:%M %p")
+    saved_tests.append(data)
+    _save("saved_tests.json", saved_tests)
+    return {"ok": True, "id": data["id"]}
+
+@app.delete("/tests/saved/{tid}")
+def delete_saved_test(tid: str):
+    global saved_tests
+    before = len(saved_tests)
+    saved_tests = [t for t in saved_tests if t["id"] != tid]
+    _save("saved_tests.json", saved_tests)
+    return {"ok": True, "removed": before - len(saved_tests)}
+
+# ── Start ──────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
