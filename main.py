@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import time, json, os, uuid
+import time, json, os, uuid, random, string
 import uvicorn
 
 app = FastAPI(title="MathReady GA API")
@@ -30,6 +30,10 @@ def _load(filename, default):
 def _save(filename, data):
     with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
 
+def gen_code():
+    """Generate a random 6-char alphanumeric code."""
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
 # ── State ──────────────────────────────────────────────────
 sessions      = _load("sessions.json",    {})
 heartbeats    = {}
@@ -46,6 +50,7 @@ class Session(BaseModel):
     submitted: str
     timeUsed:  str
     answers:   dict
+    testCode:  Optional[str] = ""
 
 class Heartbeat(BaseModel):
     name:    str
@@ -68,6 +73,7 @@ class ActiveTest(BaseModel):
 
 class SavedTest(BaseModel):
     name:      str
+    code:      Optional[str] = None
     questions: List[Any]
     title:     Optional[str] = ""
 
@@ -144,7 +150,7 @@ def delete_question(qid: str):
     _save("active_test.json", active_test)
     return {"ok": True, "removed": before - len(question_bank)}
 
-# ── Active Test ────────────────────────────────────────────
+# ── Active Test (legacy fallback) ──────────────────────────
 @app.get("/test/active")
 def get_active_test():
     return active_test
@@ -156,11 +162,26 @@ def activate_test(test: ActiveTest):
     _save("active_test.json", active_test)
     return {"ok": True, "count": len(active_test["questions"])}
 
+# ── Lookup test by student code ────────────────────────────
+@app.get("/test/code/{code}")
+def get_test_by_code(code: str):
+    code = code.strip().upper()
+    # Search saved tests for matching code
+    match = next((t for t in saved_tests if t.get("code","").upper() == code), None)
+    if match:
+        return {"ok": True, "found": True, "questions": match["questions"], "title": match.get("title", match.get("name",""))}
+    # Fall back to active test if no code match
+    return {"ok": True, "found": False, "questions": [], "title": ""}
+
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
 def get_saved_tests():
-    # Return list without full question content for efficiency
-    return [{"id": t["id"], "name": t["name"], "title": t.get("title",""), "count": len(t.get("questions",[])), "saved_at": t.get("saved_at","")} for t in saved_tests]
+    return [
+        {"id": t["id"], "name": t["name"], "code": t.get("code",""),
+         "title": t.get("title",""), "count": len(t.get("questions",[])),
+         "saved_at": t.get("saved_at","")}
+        for t in saved_tests
+    ]
 
 @app.get("/tests/saved/{tid}")
 def get_saved_test(tid: str):
@@ -173,9 +194,33 @@ def save_test(test: SavedTest):
     data = test.dict()
     data["id"]       = "t" + uuid.uuid4().hex[:8]
     data["saved_at"] = time.strftime("%b %d, %Y %I:%M %p")
+    # Auto-generate code if not provided or empty
+    if not data.get("code"):
+        data["code"] = gen_code()
+    else:
+        data["code"] = data["code"].strip().upper()
+    # Ensure code is unique
+    existing_codes = {t.get("code","") for t in saved_tests}
+    while data["code"] in existing_codes:
+        data["code"] = gen_code()
     saved_tests.append(data)
     _save("saved_tests.json", saved_tests)
-    return {"ok": True, "id": data["id"]}
+    return {"ok": True, "id": data["id"], "code": data["code"]}
+
+@app.put("/tests/saved/{tid}")
+def update_saved_test(tid: str, test: SavedTest):
+    t = next((t for t in saved_tests if t["id"]==tid), None)
+    if not t: raise HTTPException(status_code=404, detail="Test not found")
+    new_code = test.code.strip().upper() if test.code else t.get("code","")
+    # Check uniqueness (allow keeping same code)
+    existing_codes = {x.get("code","") for x in saved_tests if x["id"] != tid}
+    if new_code in existing_codes:
+        raise HTTPException(status_code=400, detail="Code already in use")
+    t["name"]  = test.name
+    t["code"]  = new_code
+    t["title"] = test.title or ""
+    _save("saved_tests.json", saved_tests)
+    return {"ok": True, "code": new_code}
 
 @app.delete("/tests/saved/{tid}")
 def delete_saved_test(tid: str):
