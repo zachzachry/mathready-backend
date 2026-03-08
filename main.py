@@ -4,6 +4,7 @@ FastAPI + JSON file persistence
 """
 
 from fastapi import FastAPI, HTTPException
+import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
@@ -289,6 +290,21 @@ def remove_student(cid: str, sid: str):
     _save("roster.json", roster)
     return {"ok": True, "removed": before - len(cls["students"])}
 
+# ── Bulk seed ─────────────────────────────────────────────
+@app.post("/questions/seed")
+def seed_questions(questions_in: List[Any] = fastapi.Body(...)):
+    """Bulk-load questions — appends only questions with IDs not already in bank."""
+    global question_bank
+    existing_ids = {q.get("id") for q in question_bank}
+    added = 0
+    for q in questions_in:
+        if q.get("id") not in existing_ids:
+            question_bank.append(q)
+            existing_ids.add(q.get("id"))
+            added += 1
+    _save("questions.json", question_bank)
+    return {"ok": True, "added": added, "total": len(question_bank)}
+
 # ── PIN Migration ─────────────────────────────────────────
 @app.post("/roster/pins/generate-missing")
 def generate_missing_pins():
@@ -311,12 +327,16 @@ def generate_missing_pins():
 # ── PIN Auth ───────────────────────────────────────────────
 TEACHER_PIN = "00000"   # teacher changes this in Railway env var
 
+@app.get("/auth/teacher-pin-check")
+def teacher_pin_check():
+    """Debug: confirm what teacher PIN the server is using (masked)."""
+    tp = os.environ.get("TEACHER_PIN", TEACHER_PIN)
+    return {"length": len(tp), "first_digit": tp[0] if tp else "?", "source": "env" if os.environ.get("TEACHER_PIN") else "default"}
+
 @app.get("/auth/pin/{pin}")
 def auth_pin(pin: str):
     """Resolve a 5-digit PIN to a role + identity."""
     pin = pin.strip()
-    # Teacher
-    import os
     teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
     if pin == teacher_pin:
         return {"role": "teacher"}
