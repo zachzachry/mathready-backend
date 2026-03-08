@@ -11,15 +11,8 @@ import time, json, os, uuid, random, string
 import uvicorn
 
 app = FastAPI(title="MathReady GA API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── File-based persistence ─────────────────────────────────
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 def _path(name): return os.path.join(DATA_DIR, name)
@@ -31,30 +24,40 @@ def _save(filename, data):
     with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
 
 def gen_code():
-    """Generate a random 6-char alphanumeric code."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 # ── State ──────────────────────────────────────────────────
-sessions      = _load("sessions.json",    {})
+# Sessions: migrate from old dict format to list
+_raw_sessions = _load("sessions.json", [])
+if isinstance(_raw_sessions, dict):
+    sessions = list(_raw_sessions.values())
+    _save("sessions.json", sessions)
+else:
+    sessions = _raw_sessions
+
 heartbeats    = {}
 question_bank = _load("questions.json",   [])
 active_test   = _load("active_test.json", {"questions": [], "title": "Practice Test"})
 saved_tests   = _load("saved_tests.json", [])
+roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
-    name:      str
-    score:     int
-    total:     int
-    pct:       int
-    submitted: str
-    timeUsed:  str
-    answers:   dict
-    testCode:  Optional[str] = ""
+    studentId:   Optional[str] = ""
+    studentName: str
+    classId:     Optional[str] = ""
+    className:   Optional[str] = ""
+    testCode:    Optional[str] = ""
+    testTitle:   Optional[str] = ""
+    score:       int
+    total:       int
+    pct:         int
+    submitted:   str
+    timeUsed:    str
+    answers:     dict
 
 class Heartbeat(BaseModel):
-    name:    str
-    current: int
+    name: str; current: int
 
 class Question(BaseModel):
     id:            Optional[str] = None
@@ -77,26 +80,28 @@ class SavedTest(BaseModel):
     questions: List[Any]
     title:     Optional[str] = ""
 
+class NewClass(BaseModel):
+    name: str
+
+class AddStudents(BaseModel):
+    students: List[str]  # list of names (one or many)
+
 # ── Health ─────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {
-        "status": "MathReady GA server is running ✓",
-        "questions": len(question_bank),
-        "active": len(active_test.get("questions", [])),
-        "saved_tests": len(saved_tests),
-    }
+    return {"status": "MathReady GA ✓", "questions": len(question_bank),
+            "sessions": len(sessions), "saved_tests": len(saved_tests), "classes": len(roster)}
 
-# ── Sessions ───────────────────────────────────────────────
+# ── Sessions (append model) ────────────────────────────────
 @app.post("/submit")
 def submit_session(session: Session):
-    sessions[session.name] = session.dict()
+    sessions.append(session.dict())
     _save("sessions.json", sessions)
     return {"ok": True}
 
 @app.get("/sessions")
 def get_sessions():
-    return list(sessions.values())
+    return sessions
 
 @app.delete("/sessions")
 def clear_sessions():
@@ -112,12 +117,10 @@ def post_heartbeat(hb: Heartbeat):
 @app.get("/active")
 def get_active_students():
     now = time.time()
-    return [
-        {"name": n, "current_question": d["current_question"],
-         "seconds_since_ping": round(now - d["last_ping"]),
-         "status": "active" if now - d["last_ping"] < 35 else "slow"}
-        for n, d in heartbeats.items() if now - d["last_ping"] < 60
-    ]
+    return [{"name": n, "current_question": d["current_question"],
+             "seconds_since_ping": round(now - d["last_ping"]),
+             "status": "active" if now - d["last_ping"] < 35 else "slow"}
+            for n, d in heartbeats.items() if now - d["last_ping"] < 60]
 
 # ── Question Bank ──────────────────────────────────────────
 @app.get("/questions")
@@ -130,13 +133,10 @@ def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
 @app.post("/questions")
 def save_question(q: Question):
     data = q.dict()
-    if not data.get("id"):
-        data["id"] = "q" + uuid.uuid4().hex[:8]
-    existing = next((i for i,x in enumerate(question_bank) if x.get("id")==data["id"]), None)
-    if existing is not None:
-        question_bank[existing] = data
-    else:
-        question_bank.append(data)
+    if not data.get("id"): data["id"] = "q" + uuid.uuid4().hex[:8]
+    idx = next((i for i,x in enumerate(question_bank) if x.get("id")==data["id"]), None)
+    if idx is not None: question_bank[idx] = data
+    else: question_bank.append(data)
     _save("questions.json", question_bank)
     return {"ok": True, "id": data["id"]}
 
@@ -146,47 +146,39 @@ def delete_question(qid: str):
     before = len(question_bank)
     question_bank = [q for q in question_bank if q.get("id") != qid]
     _save("questions.json", question_bank)
-    active_test["questions"] = [q for q in active_test.get("questions",[]) if q.get("id") != qid]
-    _save("active_test.json", active_test)
     return {"ok": True, "removed": before - len(question_bank)}
 
-# ── Active Test (legacy fallback) ──────────────────────────
+# ── Active Test ────────────────────────────────────────────
 @app.get("/test/active")
-def get_active_test():
-    return active_test
+def get_active_test(): return active_test
 
 @app.post("/test/activate")
 def activate_test(test: ActiveTest):
     global active_test
     active_test = test.dict()
     _save("active_test.json", active_test)
-    return {"ok": True, "count": len(active_test["questions"])}
+    return {"ok": True}
 
-# ── Lookup test by student code ────────────────────────────
 @app.get("/test/code/{code}")
 def get_test_by_code(code: str):
     code = code.strip().upper()
-    # Search saved tests for matching code
     match = next((t for t in saved_tests if t.get("code","").upper() == code), None)
     if match:
-        return {"ok": True, "found": True, "questions": match["questions"], "title": match.get("title", match.get("name",""))}
-    # Fall back to active test if no code match
+        return {"ok": True, "found": True, "questions": match["questions"],
+                "title": match.get("title", match.get("name",""))}
     return {"ok": True, "found": False, "questions": [], "title": ""}
 
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
 def get_saved_tests():
-    return [
-        {"id": t["id"], "name": t["name"], "code": t.get("code",""),
-         "title": t.get("title",""), "count": len(t.get("questions",[])),
-         "saved_at": t.get("saved_at","")}
-        for t in saved_tests
-    ]
+    return [{"id": t["id"], "name": t["name"], "code": t.get("code",""),
+             "title": t.get("title",""), "count": len(t.get("questions",[])),
+             "saved_at": t.get("saved_at","")} for t in saved_tests]
 
 @app.get("/tests/saved/{tid}")
 def get_saved_test(tid: str):
     t = next((t for t in saved_tests if t["id"]==tid), None)
-    if not t: raise HTTPException(status_code=404, detail="Test not found")
+    if not t: raise HTTPException(404, "Not found")
     return t
 
 @app.post("/tests/saved")
@@ -194,15 +186,10 @@ def save_test(test: SavedTest):
     data = test.dict()
     data["id"]       = "t" + uuid.uuid4().hex[:8]
     data["saved_at"] = time.strftime("%b %d, %Y %I:%M %p")
-    # Auto-generate code if not provided or empty
-    if not data.get("code"):
-        data["code"] = gen_code()
-    else:
-        data["code"] = data["code"].strip().upper()
-    # Ensure code is unique
-    existing_codes = {t.get("code","") for t in saved_tests}
-    while data["code"] in existing_codes:
-        data["code"] = gen_code()
+    if not data.get("code"): data["code"] = gen_code()
+    else: data["code"] = data["code"].strip().upper()
+    existing = {t.get("code","") for t in saved_tests}
+    while data["code"] in existing: data["code"] = gen_code()
     saved_tests.append(data)
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "id": data["id"], "code": data["code"]}
@@ -210,15 +197,11 @@ def save_test(test: SavedTest):
 @app.put("/tests/saved/{tid}")
 def update_saved_test(tid: str, test: SavedTest):
     t = next((t for t in saved_tests if t["id"]==tid), None)
-    if not t: raise HTTPException(status_code=404, detail="Test not found")
+    if not t: raise HTTPException(404, "Not found")
     new_code = test.code.strip().upper() if test.code else t.get("code","")
-    # Check uniqueness (allow keeping same code)
-    existing_codes = {x.get("code","") for x in saved_tests if x["id"] != tid}
-    if new_code in existing_codes:
-        raise HTTPException(status_code=400, detail="Code already in use")
-    t["name"]  = test.name
-    t["code"]  = new_code
-    t["title"] = test.title or ""
+    if new_code in {x.get("code","") for x in saved_tests if x["id"] != tid}:
+        raise HTTPException(400, "Code already in use")
+    t["name"] = test.name; t["code"] = new_code; t["title"] = test.title or ""
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "code": new_code}
 
@@ -230,6 +213,56 @@ def delete_saved_test(tid: str):
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "removed": before - len(saved_tests)}
 
-# ── Start ──────────────────────────────────────────────────
+# ── Roster ─────────────────────────────────────────────────
+@app.get("/roster")
+def get_roster(): return roster
+
+@app.post("/roster/class")
+def create_class(body: NewClass):
+    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": []}
+    roster.append(cls)
+    _save("roster.json", roster)
+    return {"ok": True, "id": cls["id"]}
+
+@app.put("/roster/class/{cid}")
+def rename_class(cid: str, body: NewClass):
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    cls["name"] = body.name.strip()
+    _save("roster.json", roster)
+    return {"ok": True}
+
+@app.delete("/roster/class/{cid}")
+def delete_class(cid: str):
+    global roster
+    roster = [c for c in roster if c["id"] != cid]
+    _save("roster.json", roster)
+    return {"ok": True}
+
+@app.post("/roster/class/{cid}/students")
+def add_students(cid: str, body: AddStudents):
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    added = []
+    existing_names = {s["name"].lower() for s in cls["students"]}
+    for name in body.students:
+        name = name.strip()
+        if name and name.lower() not in existing_names:
+            student = {"id": "s" + uuid.uuid4().hex[:8], "name": name}
+            cls["students"].append(student)
+            existing_names.add(name.lower())
+            added.append(student)
+    _save("roster.json", roster)
+    return {"ok": True, "added": len(added), "students": added}
+
+@app.delete("/roster/class/{cid}/student/{sid}")
+def remove_student(cid: str, sid: str):
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    before = len(cls["students"])
+    cls["students"] = [s for s in cls["students"] if s["id"] != sid]
+    _save("roster.json", roster)
+    return {"ok": True, "removed": before - len(cls["students"])}
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
