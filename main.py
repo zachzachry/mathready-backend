@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
+import random
+import os
 import time, json, os, uuid, random, string
 import uvicorn
 
@@ -270,7 +272,8 @@ def add_students(cid: str, body: AddStudents):
     for name in body.students:
         name = name.strip()
         if name and name.lower() not in existing_names:
-            student = {"id": "s" + uuid.uuid4().hex[:8], "name": name}
+            pin = str(random.randint(10000, 99999))
+            student = {"id": "s" + uuid.uuid4().hex[:8], "name": name, "pin": pin}
             cls["students"].append(student)
             existing_names.add(name.lower())
             added.append(student)
@@ -285,6 +288,88 @@ def remove_student(cid: str, sid: str):
     cls["students"] = [s for s in cls["students"] if s["id"] != sid]
     _save("roster.json", roster)
     return {"ok": True, "removed": before - len(cls["students"])}
+
+# ── PIN Migration ─────────────────────────────────────────
+@app.post("/roster/pins/generate-missing")
+def generate_missing_pins():
+    """Assign PINs to any students who don't have one yet."""
+    used = {s.get("pin") for c in roster for s in c["students"] if s.get("pin")}
+    count = 0
+    for cls in roster:
+        for s in cls["students"]:
+            if not s.get("pin"):
+                for _ in range(200):
+                    pin = str(random.randint(10000, 99999))
+                    if pin not in used:
+                        s["pin"] = pin
+                        used.add(pin)
+                        count += 1
+                        break
+    _save("roster.json", roster)
+    return {"ok": True, "generated": count}
+
+# ── PIN Auth ───────────────────────────────────────────────
+TEACHER_PIN = "00000"   # teacher changes this in Railway env var
+
+@app.get("/auth/pin/{pin}")
+def auth_pin(pin: str):
+    """Resolve a 5-digit PIN to a role + identity."""
+    pin = pin.strip()
+    # Teacher
+    import os
+    teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
+    if pin == teacher_pin:
+        return {"role": "teacher"}
+    # Student — search roster
+    for cls in roster:
+        for s in cls["students"]:
+            if s.get("pin") == pin:
+                return {
+                    "role":      "student",
+                    "studentId":   s["id"],
+                    "studentName": s["name"],
+                    "classId":     cls["id"],
+                    "className":   cls["name"],
+                }
+    return {"role": "unknown"}
+
+@app.put("/roster/class/{cid}/student/{sid}/pin")
+def set_student_pin(cid: str, sid: str):
+    """Generate a new PIN for a student."""
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    s = next((s for s in cls["students"] if s["id"]==sid), None)
+    if not s: raise HTTPException(404, "Student not found")
+    # Generate unique PIN
+    used = {st.get("pin") for c in roster for st in c["students"]}
+    for _ in range(100):
+        pin = str(random.randint(10000, 99999))
+        if pin not in used:
+            s["pin"] = pin
+            _save("roster.json", roster)
+            return {"ok": True, "pin": pin}
+    raise HTTPException(500, "Could not generate unique PIN")
+
+@app.put("/roster/class/{cid}/student/{sid}/pin/set")
+def set_student_pin_manual(cid: str, sid: str, pin: str):
+    """Manually set a specific PIN for a student."""
+    if len(pin) != 5 or not pin.isdigit():
+        raise HTTPException(400, "PIN must be exactly 5 digits")
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    s = next((s for s in cls["students"] if s["id"]==sid), None)
+    if not s: raise HTTPException(404, "Student not found")
+    # Check uniqueness
+    teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
+    if pin == teacher_pin:
+        raise HTTPException(400, "PIN already in use")
+    for c in roster:
+        for st in c["students"]:
+            if st["id"] != sid and st.get("pin") == pin:
+                raise HTTPException(400, "PIN already in use by another student")
+    s["pin"] = pin
+    _save("roster.json", roster)
+    return {"ok": True, "pin": pin}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
