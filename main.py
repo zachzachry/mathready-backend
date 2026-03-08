@@ -184,7 +184,10 @@ def get_test_by_code(code: str):
 def get_saved_tests():
     return [{"id": t["id"], "name": t["name"], "code": t.get("code",""),
              "title": t.get("title",""), "count": len(t.get("questions",[])),
-             "saved_at": t.get("saved_at","")} for t in saved_tests]
+             "saved_at": t.get("saved_at",""),
+             "type": t.get("type","test"),
+             "drill_count": t.get("drillCount", 10),
+             "drill_standards": t.get("drillStandards",[])} for t in saved_tests]
 
 @app.get("/tests/saved/{tid}")
 def get_saved_test(tid: str):
