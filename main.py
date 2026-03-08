@@ -43,6 +43,7 @@ question_bank = _load("questions.json",   [])
 active_test   = _load("active_test.json", {"questions": [], "title": "Practice Test"})
 saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
+teachers      = _load("teachers.json",   [])   # list of {id, name, pin, classIds:[]}
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
@@ -93,6 +94,11 @@ class NewClass(BaseModel):
 class AddStudents(BaseModel):
     students: List[str]  # list of names (one or many)
 
+class NewTeacher(BaseModel):
+    name: str
+    pin:  str
+    classIds: Optional[List[str]] = []
+
 # ── Health ─────────────────────────────────────────────────
 @app.get("/")
 def root():
@@ -107,8 +113,11 @@ def submit_session(session: Session):
     return {"ok": True}
 
 @app.get("/sessions")
-def get_sessions():
-    return sessions
+def get_sessions(classIds: Optional[str] = None):
+    if not classIds:
+        return sessions
+    ids = set(classIds.split(","))
+    return [s for s in sessions if s.get("classId") in ids]
 
 @app.get("/student/history/{student_id}")
 def get_student_history(student_id: str):
@@ -240,7 +249,11 @@ def delete_saved_test(tid: str):
 
 # ── Roster ─────────────────────────────────────────────────
 @app.get("/roster")
-def get_roster(): return roster
+def get_roster(classIds: Optional[str] = None):
+    if not classIds:
+        return roster
+    ids = set(classIds.split(","))
+    return [c for c in roster if c["id"] in ids]
 
 @app.post("/roster/class")
 def create_class(body: NewClass):
@@ -359,6 +372,71 @@ def admin_overview():
         "totalSessions": len(sessions),
     }
 
+# ── Teacher accounts ──────────────────────────────────────
+@app.get("/teachers")
+def get_teachers():
+    # Return teachers without exposing PINs
+    return [{"id":t["id"],"name":t["name"],"classIds":t.get("classIds",[]),
+             "pinSet": bool(t.get("pin"))} for t in teachers]
+
+@app.post("/teachers")
+def create_teacher(body: NewTeacher):
+    if len(body.pin) != 5 or not body.pin.isdigit():
+        raise HTTPException(400, "PIN must be exactly 5 digits")
+    # Check PIN uniqueness across everything
+    used = _all_used_pins()
+    if body.pin in used:
+        raise HTTPException(400, "PIN already in use")
+    t = {"id": "t" + uuid.uuid4().hex[:8], "name": body.name.strip(),
+         "pin": body.pin, "classIds": body.classIds or []}
+    teachers.append(t)
+    _save("teachers.json", teachers)
+    return {"ok": True, "id": t["id"]}
+
+@app.put("/teachers/{tid}")
+def update_teacher(tid: str, body: NewTeacher):
+    t = next((t for t in teachers if t["id"]==tid), None)
+    if not t: raise HTTPException(404, "Teacher not found")
+    if body.pin and body.pin != t["pin"]:
+        if len(body.pin) != 5 or not body.pin.isdigit():
+            raise HTTPException(400, "PIN must be exactly 5 digits")
+        used = _all_used_pins(exclude_teacher=tid)
+        if body.pin in used:
+            raise HTTPException(400, "PIN already in use")
+        t["pin"] = body.pin
+    t["name"]     = body.name.strip()
+    t["classIds"] = body.classIds or []
+    _save("teachers.json", teachers)
+    return {"ok": True}
+
+@app.delete("/teachers/{tid}")
+def delete_teacher(tid: str):
+    global teachers
+    teachers = [t for t in teachers if t["id"] != tid]
+    _save("teachers.json", teachers)
+    return {"ok": True}
+
+@app.put("/teachers/{tid}/classes")
+def set_teacher_classes(tid: str, body: AddStudents):
+    # reuse AddStudents — body.students is a list of classIds here
+    t = next((t for t in teachers if t["id"]==tid), None)
+    if not t: raise HTTPException(404, "Teacher not found")
+    t["classIds"] = body.students
+    _save("teachers.json", teachers)
+    return {"ok": True}
+
+def _all_used_pins(exclude_teacher=None):
+    used = set()
+    used.add(os.environ.get("TEACHER_PIN", TEACHER_PIN))
+    used.add(os.environ.get("ADMIN_PIN",   ADMIN_PIN))
+    for t in teachers:
+        if t["id"] != exclude_teacher:
+            used.add(t.get("pin",""))
+    for c in roster:
+        for s in c["students"]:
+            if s.get("pin"): used.add(s["pin"])
+    return used
+
 # ── PIN Migration ─────────────────────────────────────────
 @app.post("/roster/pins/generate-missing")
 def generate_missing_pins():
@@ -394,16 +472,28 @@ def auth_pin(pin: str):
     pin = pin.strip()
     teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
     admin_pin   = os.environ.get("ADMIN_PIN",   ADMIN_PIN)
-    if pin == teacher_pin:
-        return {"role": "teacher"}
     if pin == admin_pin and admin_pin != teacher_pin:
         return {"role": "admin"}
+    # Check teacher accounts first
+    for t in teachers:
+        if t.get("pin") == pin:
+            return {
+                "role":        "teacher",
+                "teacherId":   t["id"],
+                "teacherName": t["name"],
+                "classIds":    t.get("classIds", []),
+                "isLegacy":    False,
+            }
+    # Legacy single teacher PIN
+    if pin == teacher_pin:
+        return {"role": "teacher", "teacherId": None, "teacherName": "Teacher",
+                "classIds": None, "isLegacy": True}
     # Student — search roster
     for cls in roster:
         for s in cls["students"]:
             if s.get("pin") == pin:
                 return {
-                    "role":      "student",
+                    "role":        "student",
                     "studentId":   s["id"],
                     "studentName": s["name"],
                     "classId":     cls["id"],
@@ -437,14 +527,11 @@ def set_student_pin_manual(cid: str, sid: str, pin: str):
     if not cls: raise HTTPException(404, "Class not found")
     s = next((s for s in cls["students"] if s["id"]==sid), None)
     if not s: raise HTTPException(404, "Student not found")
-    # Check uniqueness
-    teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
-    if pin == teacher_pin:
+    # Check uniqueness across all PINs
+    used = _all_used_pins()
+    used.discard(s.get("pin",""))  # allow keeping same PIN
+    if pin in used:
         raise HTTPException(400, "PIN already in use")
-    for c in roster:
-        for st in c["students"]:
-            if st["id"] != sid and st.get("pin") == pin:
-                raise HTTPException(400, "PIN already in use by another student")
     s["pin"] = pin
     _save("roster.json", roster)
     return {"ok": True, "pin": pin}
