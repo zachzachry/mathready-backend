@@ -75,11 +75,14 @@ class ActiveTest(BaseModel):
     title:     Optional[str] = "Practice Test"
 
 class SavedTest(BaseModel):
-    name:      str
-    code:      Optional[str] = None
-    questions: List[Any]
-    title:     Optional[str] = ""
-    adaptive:  Optional[bool] = False
+    name:           str
+    code:           Optional[str] = None
+    questions:      List[Any]
+    title:          Optional[str] = ""
+    adaptive:       Optional[bool] = False
+    type:           Optional[str] = "test"       # "test" | "drill"
+    drillStandards: Optional[List[str]] = []
+    drillCount:     Optional[int] = 10
 
 class NewClass(BaseModel):
     name: str
