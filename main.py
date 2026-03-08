@@ -174,10 +174,18 @@ def activate_test(test: ActiveTest):
 def get_test_by_code(code: str):
     code = code.strip().upper()
     match = next((t for t in saved_tests if t.get("code","").upper() == code), None)
-    if match:
-        return {"ok": True, "found": True, "questions": match["questions"],
-                "title": match.get("title", match.get("name",""))}
-    return {"ok": True, "found": False, "questions": [], "title": ""}
+    if not match:
+        return {"found": False}
+    return {
+        "found":          True,
+        "questions":      match.get("questions", []),
+        "title":          match.get("title", match.get("name", "")),
+        "code":           code,
+        "adaptive":       match.get("adaptive", False),
+        "type":           match.get("type", "test"),
+        "drillStandards": match.get("drillStandards", []),
+        "drillCount":     match.get("drillCount", 10),
+    }
 
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
