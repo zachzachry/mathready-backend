@@ -40,6 +40,22 @@ else:
 
 heartbeats    = {}
 question_bank = _load("questions.json",   [])
+
+def _is_qid(qid):
+    """True if qid matches the Q00001 format (Q + 5 digits)."""
+    return bool(qid and qid.startswith("Q") and len(qid) == 6 and qid[1:].isdigit())
+
+def _next_question_id():
+    """Return next sequential question ID like Q00001, Q00042."""
+    existing = set()
+    for q in question_bank:
+        qid = q.get("id","")
+        if _is_qid(qid):
+            existing.add(int(qid[1:]))
+    n = 1
+    while n in existing:
+        n += 1
+    return f"Q{n:05d}"
 active_test   = _load("active_test.json", {"questions": [], "title": "Practice Test"})
 saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
@@ -158,7 +174,10 @@ def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
 @app.post("/questions")
 def save_question(q: Question):
     data = q.dict()
-    if not data.get("id"): data["id"] = "q" + uuid.uuid4().hex[:8]
+    qid = data.get("id","")
+    # Assign new ID if missing or old short-format (Q001 style)
+    if not qid or (qid.startswith("Q") and len(qid) < 6 and qid[1:].isdigit()):
+        data["id"] = _next_question_id()
     idx = next((i for i,x in enumerate(question_bank) if x.get("id")==data["id"]), None)
     if idx is not None: question_bank[idx] = data
     else: question_bank.append(data)
@@ -314,13 +333,37 @@ def seed_questions(questions_in: List[Any] = fastapi.Body(...)):
     global question_bank
     existing_ids = {q.get("id") for q in question_bank}
     added = 0
+    skipped_duplicate = []
+    reassigned = []
     for q in questions_in:
-        if q.get("id") not in existing_ids:
+        q = dict(q)
+        qid = q.get("id","")
+        # Normalize old short format (Q001 -> assign new) or missing/hex
+        needs_new_id = (
+            not qid or
+            not qid.startswith("Q") or
+            not qid[1:].isdigit() or
+            (qid.startswith("Q") and len(qid) < 6)
+        )
+        if needs_new_id:
+            q["id"] = _next_question_id()
             question_bank.append(q)
-            existing_ids.add(q.get("id"))
+            existing_ids.add(q["id"])
+            added += 1
+        elif qid in existing_ids:
+            skipped_duplicate.append(qid)
+        else:
+            question_bank.append(q)
+            existing_ids.add(qid)
             added += 1
     _save("questions.json", question_bank)
-    return {"ok": True, "added": added, "total": len(question_bank)}
+    return {
+        "ok": True,
+        "added": added,
+        "total": len(question_bank),
+        "duplicates": skipped_duplicate,
+        "duplicate_count": len(skipped_duplicate),
+    }
 
 # ── Admin analytics ───────────────────────────────────────
 @app.get("/admin/overview")
