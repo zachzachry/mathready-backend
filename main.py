@@ -79,6 +79,7 @@ class SavedTest(BaseModel):
     code:      Optional[str] = None
     questions: List[Any]
     title:     Optional[str] = ""
+    adaptive:  Optional[bool] = False
 
 class NewClass(BaseModel):
     name: str
@@ -102,6 +103,13 @@ def submit_session(session: Session):
 @app.get("/sessions")
 def get_sessions():
     return sessions
+
+@app.get("/student/history/{student_id}")
+def get_student_history(student_id: str):
+    """Return all sessions for a specific student (by studentId or name)."""
+    history = [s for s in sessions
+               if s.get("studentId") == student_id or s.get("studentName") == student_id]
+    return history
 
 @app.delete("/sessions")
 def clear_sessions():
