@@ -114,9 +114,11 @@ def submit_session(session: Session):
 
 @app.get("/sessions")
 def get_sessions(classIds: Optional[str] = None):
-    if not classIds:
+    if classIds is None or classIds.strip() == "":
         return sessions
-    ids = set(classIds.split(","))
+    ids = {i for i in classIds.split(",") if i.strip()}
+    if not ids:
+        return []
     return [s for s in sessions if s.get("classId") in ids]
 
 @app.get("/student/history/{student_id}")
@@ -250,9 +252,11 @@ def delete_saved_test(tid: str):
 # ── Roster ─────────────────────────────────────────────────
 @app.get("/roster")
 def get_roster(classIds: Optional[str] = None):
-    if not classIds:
+    if classIds is None or classIds.strip() == "":
         return roster
-    ids = set(classIds.split(","))
+    ids = {i for i in classIds.split(",") if i.strip()}
+    if not ids:
+        return []
     return [c for c in roster if c["id"] in ids]
 
 @app.post("/roster/class")
@@ -397,13 +401,15 @@ def create_teacher(body: NewTeacher):
 def update_teacher(tid: str, body: NewTeacher):
     t = next((t for t in teachers if t["id"]==tid), None)
     if not t: raise HTTPException(404, "Teacher not found")
-    if body.pin and body.pin != t["pin"]:
-        if len(body.pin) != 5 or not body.pin.isdigit():
+    # Only update PIN if a new one was explicitly provided
+    new_pin = body.pin.strip() if body.pin else ""
+    if new_pin:
+        if len(new_pin) != 5 or not new_pin.isdigit():
             raise HTTPException(400, "PIN must be exactly 5 digits")
         used = _all_used_pins(exclude_teacher=tid)
-        if body.pin in used:
+        if new_pin in used:
             raise HTTPException(400, "PIN already in use")
-        t["pin"] = body.pin
+        t["pin"] = new_pin
     t["name"]     = body.name.strip()
     t["classIds"] = body.classIds or []
     _save("teachers.json", teachers)
