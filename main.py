@@ -305,6 +305,60 @@ def seed_questions(questions_in: List[Any] = fastapi.Body(...)):
     _save("questions.json", question_bank)
     return {"ok": True, "added": added, "total": len(question_bank)}
 
+# ── Admin analytics ───────────────────────────────────────
+@app.get("/admin/overview")
+def admin_overview():
+    """School-wide summary for principal/IC view."""
+    class_stats = []
+    for cls in roster:
+        cls_sessions = [s for s in sessions if s.get("classId") == cls["id"] or s.get("className") == cls["name"]]
+        test_sessions   = [s for s in cls_sessions if s.get("mode","test") in ("test","")]
+        drill_sessions  = [s for s in cls_sessions if s.get("mode") == "drill"]
+        scores = [s["score"] for s in test_sessions if "score" in s]
+        avg = round(sum(scores)/len(scores), 1) if scores else None
+        # Standard breakdown
+        std_map = {}
+        for s in test_sessions:
+            for r in s.get("results", []):
+                std = r.get("standard","?")
+                if std not in std_map: std_map[std] = {"correct":0,"total":0}
+                std_map[std]["total"]   += 1
+                std_map[std]["correct"] += 1 if r.get("correct") else 0
+        standards = [{"standard":k,"pct":round(v["correct"]/v["total"]*100) if v["total"] else 0,"total":v["total"]}
+                     for k,v in std_map.items()]
+        standards.sort(key=lambda x: x["pct"])
+        class_stats.append({
+            "id":         cls["id"],
+            "name":       cls["name"],
+            "studentCount": len(cls["students"]),
+            "sessionCount": len(test_sessions),
+            "drillCount":   len(drill_sessions),
+            "avgScore":     avg,
+            "standards":    standards,
+            "recentActivity": max((s.get("timestamp","") for s in cls_sessions), default=None),
+        })
+    # School-wide standard gaps
+    all_std = {}
+    for s in sessions:
+        if s.get("mode","test") not in ("test",""): continue
+        for r in s.get("results",[]):
+            std = r.get("standard","?")
+            if std not in all_std: all_std[std] = {"correct":0,"total":0}
+            all_std[std]["total"]   += 1
+            all_std[std]["correct"] += 1 if r.get("correct") else 0
+    gaps = [{"standard":k,"pct":round(v["correct"]/v["total"]*100) if v["total"] else 0,"total":v["total"]}
+            for k,v in all_std.items() if v["total"] >= 5]
+    gaps.sort(key=lambda x: x["pct"])
+    total_students = sum(len(c["students"]) for c in roster)
+    tested_ids = {s.get("studentId") for s in sessions if s.get("studentId")}
+    return {
+        "classes":       class_stats,
+        "schoolGaps":    gaps[:10],
+        "totalStudents": total_students,
+        "testedStudents": len(tested_ids),
+        "totalSessions": len(sessions),
+    }
+
 # ── PIN Migration ─────────────────────────────────────────
 @app.post("/roster/pins/generate-missing")
 def generate_missing_pins():
@@ -326,6 +380,7 @@ def generate_missing_pins():
 
 # ── PIN Auth ───────────────────────────────────────────────
 TEACHER_PIN = "00000"   # teacher changes this in Railway env var
+ADMIN_PIN   = "99999"   # principal/IC — set ADMIN_PIN env var in Railway
 
 @app.get("/auth/teacher-pin-check")
 def teacher_pin_check():
@@ -338,8 +393,11 @@ def auth_pin(pin: str):
     """Resolve a 5-digit PIN to a role + identity."""
     pin = pin.strip()
     teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
+    admin_pin   = os.environ.get("ADMIN_PIN",   ADMIN_PIN)
     if pin == teacher_pin:
         return {"role": "teacher"}
+    if pin == admin_pin and admin_pin != teacher_pin:
+        return {"role": "admin"}
     # Student — search roster
     for cls in roster:
         for s in cls["students"]:
