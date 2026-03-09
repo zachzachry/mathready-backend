@@ -75,6 +75,7 @@ class Session(BaseModel):
     submitted:   str
     timeUsed:    str
     answers:     dict
+    violations:  Optional[int] = 0
 
 class Heartbeat(BaseModel):
     name: str; current: int
