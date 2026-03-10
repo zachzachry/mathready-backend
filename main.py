@@ -87,9 +87,11 @@ class Question(BaseModel):
     dok:           Optional[int] = None
     question:      str
     questionImage: Optional[str] = None
-    choices:       List[str]
+    type:          Optional[str] = "mcq"
+    choices:       Optional[List[str]] = []
     choiceImages:  Optional[List[Any]] = None
-    correct:       str
+    correct:       Optional[str] = ""
+    answer:        Optional[Any] = None
 
 class ActiveTest(BaseModel):
     questions: List[Any]
