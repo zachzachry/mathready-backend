@@ -106,6 +106,9 @@ class SavedTest(BaseModel):
     type:           Optional[str] = "test"       # "test" | "drill"
     drillStandards: Optional[List[str]] = []
     drillCount:     Optional[int] = 10
+    untimed:        Optional[bool] = False
+    timeLimitSecs:  Optional[int] = 1800         # default 30 min
+    warnSecs:       Optional[int] = 300          # default warn at 5 min
 
 class NewClass(BaseModel):
     name: str
@@ -221,6 +224,9 @@ def get_test_by_code(code: str):
         "type":           match.get("type", "test"),
         "drillStandards": match.get("drillStandards", []),
         "drillCount":     match.get("drillCount", 10),
+        "untimed":        match.get("untimed", False),
+        "timeLimitSecs":  match.get("timeLimitSecs", 1800),
+        "warnSecs":       match.get("warnSecs", 300),
     }
 
 # ── Saved Tests ────────────────────────────────────────────
