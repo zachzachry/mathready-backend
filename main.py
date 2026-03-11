@@ -167,10 +167,21 @@ def get_student_history(student_id: str):
     return history
 
 @app.delete("/sessions")
-def clear_sessions():
-    sessions.clear(); heartbeats.clear()
+def clear_sessions(mode: Optional[str] = None):
+    """Clear all sessions or only those matching mode: 'tests' or 'drills'."""
+    if mode == "tests":
+        keep = [s for s in sessions if s.get("mode","test") not in ("test","")]
+        removed = len(sessions) - len(keep)
+        sessions.clear(); sessions.extend(keep)
+    elif mode == "drills":
+        keep = [s for s in sessions if s.get("mode") not in ("drill","practice")]
+        removed = len(sessions) - len(keep)
+        sessions.clear(); sessions.extend(keep)
+    else:
+        removed = len(sessions)
+        sessions.clear(); heartbeats.clear()
     _save("sessions.json", sessions)
-    return {"ok": True}
+    return {"ok": True, "removed": removed}
 
 @app.post("/heartbeat")
 def post_heartbeat(hb: Heartbeat):
