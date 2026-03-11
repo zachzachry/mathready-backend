@@ -76,6 +76,7 @@ class Session(BaseModel):
     timeUsed:    str
     answers:     dict
     violations:  Optional[int] = 0
+    mode:        Optional[str] = "test"   # "test" | "drill" | "practice"
 
 class Heartbeat(BaseModel):
     name: str; current: int
