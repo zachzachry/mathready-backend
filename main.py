@@ -281,7 +281,14 @@ def update_saved_test(tid: str, test: SavedTest):
     new_code = test.code.strip().upper() if test.code else t.get("code","")
     if new_code in {x.get("code","") for x in saved_tests if x["id"] != tid}:
         raise HTTPException(400, "Code already in use")
-    t["name"] = test.name; t["code"] = new_code; t["title"] = test.title or ""
+    t["name"]          = test.name
+    t["code"]          = new_code
+    t["title"]         = test.title or ""
+    t["adaptive"]      = test.adaptive
+    t["untimed"]       = test.untimed
+    t["timeLimitSecs"] = test.timeLimitSecs
+    t["warnSecs"]      = test.warnSecs
+    t["oneAttempt"]    = test.oneAttempt
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "code": new_code}
 
