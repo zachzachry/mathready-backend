@@ -111,6 +111,7 @@ class SavedTest(BaseModel):
     timeLimitSecs:  Optional[int] = 1800         # default 30 min
     warnSecs:       Optional[int] = 300          # default warn at 5 min
     oneAttempt:     Optional[bool] = False        # limit to one submission per student
+    classIds:       Optional[List[str]] = []       # classes assigned to this test
 
 class NewClass(BaseModel):
     name: str
@@ -255,6 +256,8 @@ def get_test_by_code(code: str):
         "timeLimitSecs":  match.get("timeLimitSecs", 1800),
         "warnSecs":       match.get("warnSecs", 300),
         "oneAttempt":     match.get("oneAttempt", False),
+        "classIds":       match.get("classIds", []),
+        "roster":         [c for c in roster if c["id"] in match.get("classIds", [])],
     }
 
 # ── Saved Tests ────────────────────────────────────────────
