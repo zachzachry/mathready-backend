@@ -109,6 +109,7 @@ class SavedTest(BaseModel):
     untimed:        Optional[bool] = False
     timeLimitSecs:  Optional[int] = 1800         # default 30 min
     warnSecs:       Optional[int] = 300          # default warn at 5 min
+    oneAttempt:     Optional[bool] = False        # limit to one submission per student
 
 class NewClass(BaseModel):
     name: str
@@ -133,6 +134,20 @@ def submit_session(session: Session):
     sessions.append(session.dict())
     _save("sessions.json", sessions)
     return {"ok": True}
+
+@app.get("/test/attempt-check")
+def check_attempt(code: str, studentId: str = "", studentName: str = ""):
+    """Return whether a student has already submitted this test code."""
+    code = code.strip().upper()
+    already = any(
+        s.get("testCode","").upper() == code and (
+            (studentId and s.get("studentId","") == studentId) or
+            (not studentId and studentName and
+             s.get("studentName","").strip().lower() == studentName.strip().lower())
+        )
+        for s in sessions
+    )
+    return {"attempted": already}
 
 @app.get("/sessions")
 def get_sessions(classIds: Optional[str] = None):
@@ -227,6 +242,7 @@ def get_test_by_code(code: str):
         "untimed":        match.get("untimed", False),
         "timeLimitSecs":  match.get("timeLimitSecs", 1800),
         "warnSecs":       match.get("warnSecs", 300),
+        "oneAttempt":     match.get("oneAttempt", False),
     }
 
 # ── Saved Tests ────────────────────────────────────────────
