@@ -475,8 +475,10 @@ def get_teachers():
 
 @app.post("/teachers")
 def create_teacher(body: NewTeacher):
-    if len(body.pin) != 5 or not body.pin.isdigit():
-        raise HTTPException(400, "PIN must be exactly 5 digits")
+    code = body.pin.strip().upper()
+    if len(code) < 4 or len(code) > 8 or not all(c in "0123456789ABCDEF" for c in code):
+        raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
+    body.pin = code
     # Check PIN uniqueness across everything
     used = _all_used_pins()
     if body.pin in used:
@@ -494,12 +496,14 @@ def update_teacher(tid: str, body: NewTeacher):
     # Only update PIN if a new one was explicitly provided
     new_pin = body.pin.strip() if body.pin else ""
     if new_pin:
-        if len(new_pin) != 5 or not new_pin.isdigit():
-            raise HTTPException(400, "PIN must be exactly 5 digits")
+        new_pin = new_pin.upper()
+        if len(new_pin) < 4 or len(new_pin) > 8 or not all(c in "0123456789ABCDEF" for c in new_pin):
+            raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
+        body.pin = new_pin
         used = _all_used_pins(exclude_teacher=tid)
         if new_pin in used:
             raise HTTPException(400, "PIN already in use")
-        t["pin"] = new_pin
+        t["pin"] = new_pin.upper()
     t["name"]     = body.name.strip()
     t["classIds"] = body.classIds or []
     _save("teachers.json", teachers)
@@ -552,9 +556,9 @@ def generate_missing_pins():
     _save("roster.json", roster)
     return {"ok": True, "generated": count}
 
-# ── PIN Auth ───────────────────────────────────────────────
-TEACHER_PIN = "00000"   # teacher changes this in Railway env var
-ADMIN_PIN   = "99999"   # principal/IC — set ADMIN_PIN env var in Railway
+# ── Auth (hex login codes) ────────────────────────────────
+TEACHER_PIN = "00000"   # legacy fallback — set TEACHER_PIN env var in Railway
+ADMIN_PIN   = "99999"   # admin — set ADMIN_PIN env var in Railway
 
 @app.get("/auth/teacher-pin-check")
 def teacher_pin_check():
@@ -564,8 +568,8 @@ def teacher_pin_check():
 
 @app.get("/auth/pin/{pin}")
 def auth_pin(pin: str):
-    """Resolve a 5-digit PIN to a role + identity."""
-    pin = pin.strip()
+    """Resolve a hex login code to a role + identity."""
+    pin = pin.strip().upper()
     teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
     admin_pin   = os.environ.get("ADMIN_PIN",   ADMIN_PIN)
     if pin == admin_pin and admin_pin != teacher_pin:
