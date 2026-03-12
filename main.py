@@ -268,7 +268,11 @@ def get_saved_tests():
              "saved_at": t.get("saved_at",""),
              "type": t.get("type","test"),
              "drill_count": t.get("drillCount", 10),
-             "drill_standards": t.get("drillStandards",[])} for t in saved_tests]
+             "drill_standards": t.get("drillStandards",[]),
+             "classIds": t.get("classIds",[]),
+             "oneAttempt": t.get("oneAttempt", False),
+             "untimed": t.get("untimed", False),
+             "timeLimitSecs": t.get("timeLimitSecs", 1800)} for t in saved_tests]
 
 @app.get("/tests/saved/{tid}")
 def get_saved_test(tid: str):
@@ -307,6 +311,14 @@ def update_saved_test(tid: str, test: SavedTest):
     t["classIds"]      = test.classIds or []
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "code": new_code}
+
+@app.patch("/tests/saved/{tid}/classes")
+def set_test_classes(tid: str, body: dict):
+    t = next((t for t in saved_tests if t["id"]==tid), None)
+    if not t: raise HTTPException(404, "Not found")
+    t["classIds"] = body.get("classIds", [])
+    _save("saved_tests.json", saved_tests)
+    return {"ok": True}
 
 @app.delete("/tests/saved/{tid}")
 def delete_saved_test(tid: str):
