@@ -3,18 +3,47 @@ MathReady GA — Backend Server
 FastAPI + JSON file persistence
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
 import random
 import os
-import time, json, os, uuid, random, string
+import time, json, os, uuid, random, string, collections
 import uvicorn
 
 app = FastAPI(title="MathReady GA API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ── CORS — only allow our Vercel frontend ─────────────────
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://mathready-frontend.vercel.app"
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Rate limiting — auth endpoint ─────────────────────────
+# Sliding window: max 10 attempts per IP per 5 minutes
+_auth_attempts: dict = collections.defaultdict(list)
+AUTH_WINDOW  = 300   # seconds
+AUTH_MAX     = 10    # attempts per window
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    attempts = _auth_attempts[ip]
+    # Drop attempts outside the window
+    _auth_attempts[ip] = [t for t in attempts if now - t < AUTH_WINDOW]
+    if len(_auth_attempts[ip]) >= AUTH_MAX:
+        return False
+    _auth_attempts[ip].append(now)
+    return True
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -540,8 +569,8 @@ def set_teacher_classes(tid: str, body: AddStudents):
 
 def _all_used_pins(exclude_teacher=None):
     used = set()
-    used.add(os.environ.get("TEACHER_PIN", TEACHER_PIN))
-    used.add(os.environ.get("ADMIN_PIN",   ADMIN_PIN))
+    used.add(TEACHER_PIN)
+    used.add(ADMIN_PIN)
     for t in teachers:
         if t["id"] != exclude_teacher:
             used.add(t.get("pin",""))
@@ -570,21 +599,18 @@ def generate_missing_pins():
     return {"ok": True, "generated": count}
 
 # ── Auth (hex login codes) ────────────────────────────────
-TEACHER_PIN = "00000"   # legacy fallback — set TEACHER_PIN env var in Railway
-ADMIN_PIN   = "99999"   # admin — set ADMIN_PIN env var in Railway
-
-@app.get("/auth/teacher-pin-check")
-def teacher_pin_check():
-    """Debug: confirm what teacher PIN the server is using (masked)."""
-    tp = os.environ.get("TEACHER_PIN", TEACHER_PIN)
-    return {"length": len(tp), "first_digit": tp[0] if tp else "?", "source": "env" if os.environ.get("TEACHER_PIN") else "default"}
+TEACHER_PIN = os.environ.get("TEACHER_PIN", "00000")   # always set in Railway
+ADMIN_PIN   = os.environ.get("ADMIN_PIN",   "")         # empty = disabled until set in Railway
 
 @app.get("/auth/pin/{pin}")
-def auth_pin(pin: str):
+def auth_pin(pin: str, request: Request):
     """Resolve a hex login code to a role + identity."""
+    ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, "Too many attempts. Please wait 5 minutes.")
     pin = pin.strip().upper()
-    teacher_pin = os.environ.get("TEACHER_PIN", TEACHER_PIN)
-    admin_pin   = os.environ.get("ADMIN_PIN",   ADMIN_PIN)
+    teacher_pin = TEACHER_PIN
+    admin_pin   = ADMIN_PIN
     if pin == admin_pin and admin_pin != teacher_pin:
         return {"role": "admin"}
     # Check teacher accounts first
