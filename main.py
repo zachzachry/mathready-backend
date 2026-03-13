@@ -68,6 +68,8 @@ else:
     sessions = _raw_sessions
 
 heartbeats    = {}
+test_control  = {"paused": False, "stopped": False, "extensions": {}}
+# extensions = { studentName: extraSecondsGranted }
 question_bank = _load("questions.json",   [])
 
 def _is_qid(qid):
@@ -226,6 +228,33 @@ def get_active_students():
              "status": "active" if now - d["last_ping"] < 35 else "slow"}
             for n, d in heartbeats.items() if now - d["last_ping"] < 60]
 
+# ── Test Control ──────────────────────────────────────────
+@app.get("/test/control")
+def get_test_control():
+    return test_control
+
+@app.post("/test/control")
+def post_test_control(body: dict):
+    if "paused"  in body: test_control["paused"]  = bool(body["paused"])
+    if "stopped" in body: test_control["stopped"] = bool(body["stopped"])
+    if not body.get("stopped", test_control["stopped"]):
+        pass  # keep extensions alive across pause/resume
+    if body.get("stopped") == False and body.get("paused") == False:
+        # Full reset — clear extensions too
+        test_control["extensions"] = {}
+    return test_control
+
+@app.post("/test/control/extend")
+def extend_student_time(body: dict):
+    """Grant extra seconds to a specific student. studentName + extraSecs."""
+    name  = body.get("studentName", "").strip()
+    extra = int(body.get("extraSecs", 0))
+    if not name or extra <= 0:
+        raise HTTPException(400, "studentName and extraSecs required")
+    current = test_control["extensions"].get(name, 0)
+    test_control["extensions"][name] = current + extra
+    return {"ok": True, "studentName": name, "totalExtraSecs": test_control["extensions"][name]}
+
 # ── Question Bank ──────────────────────────────────────────
 @app.get("/questions")
 def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
@@ -374,11 +403,26 @@ def create_class(body: NewClass):
     _save("roster.json", roster)
     return {"ok": True, "id": cls["id"]}
 
+class UpdateClass(BaseModel):
+    name: Optional[str] = None
+    students: Optional[List[Any]] = None  # full student objects with accommodations
+
 @app.put("/roster/class/{cid}")
-def rename_class(cid: str, body: NewClass):
+def update_class(cid: str, body: UpdateClass):
     cls = next((c for c in roster if c["id"]==cid), None)
     if not cls: raise HTTPException(404, "Class not found")
-    cls["name"] = body.name.strip()
+    if body.name is not None:
+        cls["name"] = body.name.strip()
+    if body.students is not None:
+        # Merge accommodations into existing student records
+        existing = {s["id"]: s for s in cls["students"]}
+        merged = []
+        for s in body.students:
+            sid = s.get("id")
+            base = existing.get(sid, {})
+            base.update({k: v for k, v in s.items() if k in ("extendedTime", "reduceChoices", "name", "pin")})
+            merged.append(base)
+        cls["students"] = merged
     _save("roster.json", roster)
     return {"ok": True}
 
