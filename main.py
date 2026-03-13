@@ -472,10 +472,14 @@ def add_students(cid: str, body: AddStudents):
 
 @app.delete("/roster/class/{cid}/student/{sid}")
 def remove_student(cid: str, sid: str):
+    if not sid or sid == "undefined" or sid == "null":
+        raise HTTPException(400, "Invalid student ID")
     cls = next((c for c in roster if c["id"]==cid), None)
     if not cls: raise HTTPException(404, "Class not found")
     before = len(cls["students"])
     cls["students"] = [s for s in cls["students"] if s["id"] != sid]
+    if len(cls["students"]) == before:
+        raise HTTPException(404, "Student not found")
     _save("roster.json", roster)
     return {"ok": True, "removed": before - len(cls["students"])}
 
