@@ -13,6 +13,10 @@ import random
 import os
 import time, json, os, uuid, random, string, collections
 import uvicorn
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 app = FastAPI(title="MathReady GA API")
 
@@ -651,6 +655,48 @@ def generate_missing_pins():
 # ── Auth (hex login codes) ────────────────────────────────
 TEACHER_PIN = os.environ.get("TEACHER_PIN", "00000")   # always set in Railway
 ADMIN_PIN   = os.environ.get("ADMIN_PIN",   "")         # empty = disabled until set in Railway
+
+class GoogleVerifyBody(BaseModel):
+    token: str
+    code: Optional[str] = None      # test code — verify against test's assigned classes
+    classId: Optional[str] = None   # class ID  — verify against that class directly
+
+@app.post("/auth/google/verify")
+def google_verify(body: GoogleVerifyBody):
+    """Verify a Google ID token and match the email to the roster."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google auth not configured on server.")
+    try:
+        info = id_token.verify_oauth2_token(
+            body.token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except Exception as e:
+        raise HTTPException(401, f"Invalid Google token: {e}")
+
+    email = (info.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(401, "No email in token.")
+
+    # Find matching classes to search
+    if body.classId:
+        classes_to_search = [c for c in roster if c["id"] == body.classId]
+    elif body.code:
+        code = body.code.strip().upper()
+        test = next((t for t in saved_tests if t.get("code") == code), None)
+        if not test:
+            raise HTTPException(404, "Test code not found.")
+        ids = set(test.get("classIds") or [])
+        classes_to_search = [c for c in roster if c["id"] in ids]
+    else:
+        raise HTTPException(400, "Provide code or classId.")
+
+    for cls in classes_to_search:
+        for s in cls["students"]:
+            if (s.get("email") or "").lower().strip() == email:
+                return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
+
+    raise HTTPException(403, "Your Google account is not on the class roster. Check with your teacher.")
+
 
 @app.get("/auth/pin/{pin}")
 def auth_pin(pin: str, request: Request):
