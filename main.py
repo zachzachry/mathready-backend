@@ -396,6 +396,12 @@ def get_roster(classIds: Optional[str] = None):
         return []
     return [c for c in roster if c["id"] in ids]
 
+@app.get("/roster/class/{cid}")
+def get_class(cid: str):
+    cls = next((c for c in roster if c["id"]==cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    return cls
+
 @app.post("/roster/class")
 def create_class(body: NewClass):
     cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": []}
