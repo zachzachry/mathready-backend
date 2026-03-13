@@ -440,7 +440,7 @@ def update_class(cid: str, body: UpdateClass):
         for s in body.students:
             sid = s.get("id")
             base = existing.get(sid, {})
-            base.update({k: v for k, v in s.items() if k in ("extendedTime", "reduceChoices", "name", "pin")})
+            base.update({k: v for k, v in s.items() if k in ("extendedTime", "reduceChoices", "name", "pin", "email")})
             merged.append(base)
         cls["students"] = merged
     _save("roster.json", roster)
