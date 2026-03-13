@@ -159,6 +159,7 @@ class NewTeacher(BaseModel):
     name: str
     pin:  str = ""
     email: Optional[str] = None
+    role: Optional[str] = "teacher"   # super_admin | school_admin | teacher | observer
     classIds: Optional[List[str]] = []
 
 # ── Health ─────────────────────────────────────────────────
@@ -580,15 +581,16 @@ def admin_overview():
 # ── Teacher accounts ──────────────────────────────────────
 @app.get("/teachers")
 def get_teachers():
-    # Return teachers without exposing PINs
     return [{"id":t["id"],"name":t["name"],"classIds":t.get("classIds",[]),
              "email": t.get("email",""),
+             "role":  t.get("role","teacher"),
              "pinSet": bool(t.get("pin"))} for t in teachers]
 
 @app.post("/teachers")
 def create_teacher(body: NewTeacher):
     t = {"id": "t" + uuid.uuid4().hex[:8], "name": body.name.strip(),
          "email": (body.email or "").lower().strip(),
+         "role": body.role or "teacher",
          "pin": "", "classIds": body.classIds or []}
     if body.pin:
         code = body.pin.strip().upper()
@@ -618,6 +620,8 @@ def update_teacher(tid: str, body: NewTeacher):
     t["classIds"] = body.classIds or []
     if body.email is not None:
         t["email"] = body.email.lower().strip()
+    if body.role is not None:
+        t["role"] = body.role
     _save("teachers.json", teachers)
     return {"ok": True}
 
@@ -692,6 +696,7 @@ def google_teacher_verify(body: GoogleVerifyBody):
         raise HTTPException(403, "Your Google account is not registered as a teacher. Contact your administrator.")
     return {
         "role":        "teacher",
+        "teacherRole": t.get("role", "teacher"),
         "teacherId":   t["id"],
         "teacherName": t["name"],
         "classIds":    t.get("classIds", []),
@@ -755,6 +760,7 @@ def auth_pin(pin: str, request: Request):
         if t.get("pin") == pin:
             return {
                 "role":        "teacher",
+                "teacherRole": t.get("role", "teacher"),
                 "teacherId":   t["id"],
                 "teacherName": t["name"],
                 "classIds":    t.get("classIds", []),
@@ -762,8 +768,8 @@ def auth_pin(pin: str, request: Request):
             }
     # Legacy single teacher PIN
     if pin == teacher_pin:
-        return {"role": "teacher", "teacherId": None, "teacherName": "Teacher",
-                "classIds": None, "isLegacy": True}
+        return {"role": "teacher", "teacherRole": "teacher", "teacherId": None,
+                "teacherName": "Teacher", "classIds": None, "isLegacy": True}
     # Student — search roster
     for cls in roster:
         for s in cls["students"]:
