@@ -667,6 +667,11 @@ def generate_missing_pins():
     _save("roster.json", roster)
     return {"ok": True, "generated": count}
 
+class GoogleVerifyBody(BaseModel):
+    token: str
+    code: Optional[str] = None      # test code — verify against test's assigned classes
+    classId: Optional[str] = None   # class ID  — verify against that class directly
+
 @app.post("/auth/google/teacher")
 def google_teacher_verify(body: GoogleVerifyBody):
     """Verify a Google ID token and match email to a teacher account."""
@@ -695,11 +700,6 @@ def google_teacher_verify(body: GoogleVerifyBody):
 # ── Auth (hex login codes) ────────────────────────────────
 TEACHER_PIN = os.environ.get("TEACHER_PIN", "00000")   # always set in Railway
 ADMIN_PIN   = os.environ.get("ADMIN_PIN",   "")         # empty = disabled until set in Railway
-
-class GoogleVerifyBody(BaseModel):
-    token: str
-    code: Optional[str] = None      # test code — verify against test's assigned classes
-    classId: Optional[str] = None   # class ID  — verify against that class directly
 
 @app.post("/auth/google/verify")
 def google_verify(body: GoogleVerifyBody):
