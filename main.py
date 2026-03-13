@@ -150,6 +150,7 @@ class SavedTest(BaseModel):
 
 class NewClass(BaseModel):
     name: str
+    teacherId: Optional[str] = None
 
 class AddStudents(BaseModel):
     students: List[str]  # list of names (one or many)
@@ -411,6 +412,15 @@ def create_class(body: NewClass):
     cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": []}
     roster.append(cls)
     _save("roster.json", roster)
+    # Link to teacher if provided
+    if body.teacherId:
+        t = next((t for t in teachers if t["id"] == body.teacherId), None)
+        if t:
+            if "classIds" not in t or t["classIds"] is None:
+                t["classIds"] = []
+            if cls["id"] not in t["classIds"]:
+                t["classIds"].append(cls["id"])
+            _save("teachers.json", teachers)
     return {"ok": True, "id": cls["id"]}
 
 class UpdateClass(BaseModel):
