@@ -157,7 +157,8 @@ class AddStudents(BaseModel):
 
 class NewTeacher(BaseModel):
     name: str
-    pin:  str
+    pin:  str = ""
+    email: Optional[str] = None
     classIds: Optional[List[str]] = []
 
 # ── Health ─────────────────────────────────────────────────
@@ -585,16 +586,17 @@ def get_teachers():
 
 @app.post("/teachers")
 def create_teacher(body: NewTeacher):
-    code = body.pin.strip().upper()
-    if len(code) < 4 or len(code) > 8 or not all(c in "0123456789ABCDEF" for c in code):
-        raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
-    body.pin = code
-    # Check PIN uniqueness across everything
-    used = _all_used_pins()
-    if body.pin in used:
-        raise HTTPException(400, "PIN already in use")
     t = {"id": "t" + uuid.uuid4().hex[:8], "name": body.name.strip(),
-         "pin": body.pin, "classIds": body.classIds or []}
+         "email": (body.email or "").lower().strip(),
+         "pin": "", "classIds": body.classIds or []}
+    if body.pin:
+        code = body.pin.strip().upper()
+        if len(code) < 4 or len(code) > 8 or not all(c in "0123456789ABCDEF" for c in code):
+            raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
+        used = _all_used_pins()
+        if code in used:
+            raise HTTPException(400, "PIN already in use")
+        t["pin"] = code
     teachers.append(t)
     _save("teachers.json", teachers)
     return {"ok": True, "id": t["id"]}
@@ -603,19 +605,18 @@ def create_teacher(body: NewTeacher):
 def update_teacher(tid: str, body: NewTeacher):
     t = next((t for t in teachers if t["id"]==tid), None)
     if not t: raise HTTPException(404, "Teacher not found")
-    # Only update PIN if a new one was explicitly provided
-    new_pin = body.pin.strip() if body.pin else ""
-    if new_pin:
-        new_pin = new_pin.upper()
+    if body.pin:
+        new_pin = body.pin.strip().upper()
         if len(new_pin) < 4 or len(new_pin) > 8 or not all(c in "0123456789ABCDEF" for c in new_pin):
             raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
-        body.pin = new_pin
         used = _all_used_pins(exclude_teacher=tid)
         if new_pin in used:
             raise HTTPException(400, "PIN already in use")
-        t["pin"] = new_pin.upper()
+        t["pin"] = new_pin
     t["name"]     = body.name.strip()
     t["classIds"] = body.classIds or []
+    if body.email is not None:
+        t["email"] = body.email.lower().strip()
     _save("teachers.json", teachers)
     return {"ok": True}
 
@@ -665,6 +666,31 @@ def generate_missing_pins():
                         break
     _save("roster.json", roster)
     return {"ok": True, "generated": count}
+
+@app.post("/auth/google/teacher")
+def google_teacher_verify(body: GoogleVerifyBody):
+    """Verify a Google ID token and match email to a teacher account."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google auth not configured on server.")
+    try:
+        info = id_token.verify_oauth2_token(
+            body.token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except Exception as e:
+        raise HTTPException(401, f"Invalid Google token: {e}")
+    email = (info.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(401, "No email in token.")
+    t = next((t for t in teachers if (t.get("email") or "").lower().strip() == email), None)
+    if not t:
+        raise HTTPException(403, "Your Google account is not registered as a teacher. Contact your administrator.")
+    return {
+        "role":        "teacher",
+        "teacherId":   t["id"],
+        "teacherName": t["name"],
+        "classIds":    t.get("classIds", []),
+        "isLegacy":    False,
+    }
 
 # ── Auth (hex login codes) ────────────────────────────────
 TEACHER_PIN = os.environ.get("TEACHER_PIN", "00000")   # always set in Railway
