@@ -582,6 +582,7 @@ def admin_overview():
 def get_teachers():
     # Return teachers without exposing PINs
     return [{"id":t["id"],"name":t["name"],"classIds":t.get("classIds",[]),
+             "email": t.get("email",""),
              "pinSet": bool(t.get("pin"))} for t in teachers]
 
 @app.post("/teachers")
