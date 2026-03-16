@@ -742,10 +742,17 @@ def google_verify(body: GoogleVerifyBody):
     else:
         raise HTTPException(400, "Provide code or classId.")
 
+    # Match by email first, fall back to full name from Google token
+    gc_name = (info.get("name") or "").strip().lower()
     for cls in classes_to_search:
         for s in cls["students"]:
-            if (s.get("email") or "").lower().strip() == email:
+            if email and (s.get("email") or "").lower().strip() == email:
                 return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
+    if gc_name:
+        for cls in classes_to_search:
+            for s in cls["students"]:
+                if s["name"].strip().lower() == gc_name:
+                    return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
 
     raise HTTPException(403, "Your Google account is not on the class roster. Check with your teacher.")
 
@@ -762,15 +769,19 @@ def google_drill_auth(body: GoogleVerifyBody):
     except Exception as e:
         raise HTTPException(401, f"Invalid Google token: {e}")
 
-    email = (info.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(401, "No email in token.")
+    email   = (info.get("email") or "").lower().strip()
+    gc_name = (info.get("name")  or "").strip().lower()
 
-    # Student must be on roster
+    # Match by email first, fall back to full name from Google token
     for cls in roster:
         for s in cls["students"]:
-            if (s.get("email") or "").lower().strip() == email:
+            if email and (s.get("email") or "").lower().strip() == email:
                 return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
+    if gc_name:
+        for cls in roster:
+            for s in cls["students"]:
+                if s["name"].strip().lower() == gc_name:
+                    return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
 
     raise HTTPException(403, "Your Google account is not on a class roster. Ask your teacher to add your email.")
 
