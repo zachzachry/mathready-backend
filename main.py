@@ -3,14 +3,16 @@ MathReady GA — Backend Server
 FastAPI + JSON file persistence
 """
 
+from dotenv import load_dotenv
+import os as _os
+load_dotenv(dotenv_path=_os.path.join(_os.path.dirname(__file__), ".env"))
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import random
-import os
 import time, json, os, uuid, random, string, collections
 import uvicorn
 from google.oauth2 import id_token
@@ -23,7 +25,7 @@ app = FastAPI(title="MathReady GA API")
 # ── CORS — only allow our Vercel frontend ─────────────────
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
-    "https://mathready-frontend.vercel.app"
+    "https://mathready-frontend.vercel.app,http://localhost:3000,http://localhost:8001"
 ).split(",")
 
 app.add_middleware(
@@ -95,6 +97,24 @@ active_test   = _load("active_test.json", {"questions": [], "title": "Practice T
 saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
 teachers      = _load("teachers.json",   [])   # list of {id, name, pin, classIds:[]}
+fluency_data  = _load("fluency_data.json", {})  # {studentId: {add,sub,mul,div, sessions:[]}}
+avatar_data   = _load("avatar_data.json",  {})  # {studentId: {balance, owned:[], equipped:{}}}
+
+_FREE_ITEMS = ["hair_basic","shirt_white","pants_blue","acc_none"]
+_SHOP_CATALOG = [
+    {"id":"hair_basic","price":0.00},{"id":"hair_curly","price":0.25},
+    {"id":"hair_spiky","price":0.35},{"id":"hair_bun","price":0.50},
+    {"id":"hair_long","price":0.45},{"id":"hair_pigtails","price":0.60},
+    {"id":"shirt_white","price":0.00},{"id":"shirt_red","price":0.20},
+    {"id":"shirt_blue","price":0.20},{"id":"shirt_green","price":0.20},
+    {"id":"shirt_purple","price":0.30},{"id":"shirt_yellow","price":0.25},
+    {"id":"pants_blue","price":0.00},{"id":"pants_black","price":0.25},
+    {"id":"pants_khaki","price":0.25},{"id":"pants_red","price":0.35},
+    {"id":"pants_gray","price":0.20},
+    {"id":"acc_none","price":0.00},{"id":"acc_glasses","price":0.40},
+    {"id":"acc_crown","price":1.00},{"id":"acc_bow","price":0.55},
+    {"id":"acc_hat","price":0.75},
+]
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
@@ -151,6 +171,7 @@ class SavedTest(BaseModel):
 class NewClass(BaseModel):
     name: str
     teacherId: Optional[str] = None
+    gcCourseId: Optional[str] = None
 
 class AddStudents(BaseModel):
     students: List[str]  # list of names (one or many)
@@ -176,15 +197,11 @@ def submit_session(session: Session):
     return {"ok": True}
 
 @app.get("/test/attempt-check")
-def check_attempt(code: str, studentId: str = "", studentName: str = ""):
+def check_attempt(code: str, studentId: str = ""):
     """Return whether a student has already submitted this test code."""
     code = code.strip().upper()
     already = any(
-        s.get("testCode","").upper() == code and (
-            (studentId and s.get("studentId","") == studentId) or
-            (not studentId and studentName and
-             s.get("studentName","").strip().lower() == studentName.strip().lower())
-        )
+        s.get("testCode","").upper() == code and studentId and s.get("studentId","") == studentId
         for s in sessions
     )
     return {"attempted": already}
@@ -411,7 +428,7 @@ def get_class(cid: str):
 
 @app.post("/roster/class")
 def create_class(body: NewClass):
-    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": []}
+    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": [], "gcCourseId": body.gcCourseId}
     roster.append(cls)
     _save("roster.json", roster)
     # Link to teacher if provided
@@ -428,6 +445,7 @@ def create_class(body: NewClass):
 class UpdateClass(BaseModel):
     name: Optional[str] = None
     students: Optional[List[Any]] = None  # full student objects with accommodations
+    gcCourseId: Optional[str] = None
 
 @app.put("/roster/class/{cid}")
 def update_class(cid: str, body: UpdateClass):
@@ -435,6 +453,8 @@ def update_class(cid: str, body: UpdateClass):
     if not cls: raise HTTPException(404, "Class not found")
     if body.name is not None:
         cls["name"] = body.name.strip()
+    if body.gcCourseId is not None:
+        cls["gcCourseId"] = body.gcCourseId
     if body.students is not None:
         # Merge accommodations into existing student records
         existing = {s["id"]: s for s in cls["students"]}
@@ -464,8 +484,7 @@ def add_students(cid: str, body: AddStudents):
     for name in body.students:
         name = name.strip()
         if name and name.lower() not in existing_names:
-            pin = str(random.randint(10000, 99999))
-            student = {"id": "s" + uuid.uuid4().hex[:8], "name": name, "pin": pin}
+            student = {"id": "s" + uuid.uuid4().hex[:8], "name": name}
             cls["students"].append(student)
             existing_names.add(name.lower())
             added.append(student)
@@ -643,34 +662,12 @@ def set_teacher_classes(tid: str, body: AddStudents):
 
 def _all_used_pins(exclude_teacher=None):
     used = set()
-    used.add(TEACHER_PIN)
     used.add(ADMIN_PIN)
     for t in teachers:
         if t["id"] != exclude_teacher:
             used.add(t.get("pin",""))
-    for c in roster:
-        for s in c["students"]:
-            if s.get("pin"): used.add(s["pin"])
     return used
 
-# ── PIN Migration ─────────────────────────────────────────
-@app.post("/roster/pins/generate-missing")
-def generate_missing_pins():
-    """Assign PINs to any students who don't have one yet."""
-    used = {s.get("pin") for c in roster for s in c["students"] if s.get("pin")}
-    count = 0
-    for cls in roster:
-        for s in cls["students"]:
-            if not s.get("pin"):
-                for _ in range(200):
-                    pin = str(random.randint(10000, 99999))
-                    if pin not in used:
-                        s["pin"] = pin
-                        used.add(pin)
-                        count += 1
-                        break
-    _save("roster.json", roster)
-    return {"ok": True, "generated": count}
 
 class GoogleVerifyBody(BaseModel):
     token: str
@@ -700,12 +697,10 @@ def google_teacher_verify(body: GoogleVerifyBody):
         "teacherId":   t["id"],
         "teacherName": t["name"],
         "classIds":    t.get("classIds", []),
-        "isLegacy":    False,
     }
 
 # ── Auth (hex login codes) ────────────────────────────────
-TEACHER_PIN = os.environ.get("TEACHER_PIN", "00000")   # always set in Railway
-ADMIN_PIN   = os.environ.get("ADMIN_PIN",   "")         # empty = disabled until set in Railway
+ADMIN_PIN = os.environ.get("ADMIN_PIN", "")   # empty = disabled until set in Railway
 
 @app.post("/auth/google/verify")
 def google_verify(body: GoogleVerifyBody):
@@ -744,6 +739,31 @@ def google_verify(body: GoogleVerifyBody):
     raise HTTPException(403, "Your Google account is not on the class roster. Check with your teacher.")
 
 
+@app.post("/auth/google/drill")
+def google_drill_auth(body: GoogleVerifyBody):
+    """Verify Google token for fluency drill. Student must be on the class roster."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google auth not configured on server.")
+    try:
+        info = id_token.verify_oauth2_token(
+            body.token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except Exception as e:
+        raise HTTPException(401, f"Invalid Google token: {e}")
+
+    email = (info.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(401, "No email in token.")
+
+    # Student must be on roster
+    for cls in roster:
+        for s in cls["students"]:
+            if (s.get("email") or "").lower().strip() == email:
+                return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
+
+    raise HTTPException(403, "Your Google account is not on a class roster. Ask your teacher to add your email.")
+
+
 @app.get("/auth/pin/{pin}")
 def auth_pin(pin: str, request: Request):
     """Resolve a hex login code to a role + identity."""
@@ -751,11 +771,9 @@ def auth_pin(pin: str, request: Request):
     if not _check_rate_limit(ip):
         raise HTTPException(429, "Too many attempts. Please wait 5 minutes.")
     pin = pin.strip().upper()
-    teacher_pin = TEACHER_PIN
-    admin_pin   = ADMIN_PIN
-    if pin == admin_pin and admin_pin != teacher_pin:
+    if pin == ADMIN_PIN and ADMIN_PIN:
         return {"role": "admin"}
-    # Check teacher accounts first
+    # Check teacher accounts
     for t in teachers:
         if t.get("pin") == pin:
             return {
@@ -764,59 +782,148 @@ def auth_pin(pin: str, request: Request):
                 "teacherId":   t["id"],
                 "teacherName": t["name"],
                 "classIds":    t.get("classIds", []),
-                "isLegacy":    False,
             }
-    # Legacy single teacher PIN
-    if pin == teacher_pin:
-        return {"role": "teacher", "teacherRole": "teacher", "teacherId": None,
-                "teacherName": "Teacher", "classIds": None, "isLegacy": True}
-    # Student — search roster
-    for cls in roster:
-        for s in cls["students"]:
-            if s.get("pin") == pin:
-                return {
-                    "role":        "student",
-                    "studentId":   s["id"],
-                    "studentName": s["name"],
-                    "classId":     cls["id"],
-                    "className":   cls["name"],
-                }
     return {"role": "unknown"}
 
-@app.put("/roster/class/{cid}/student/{sid}/pin")
-def set_student_pin(cid: str, sid: str):
-    """Generate a new PIN for a student."""
-    cls = next((c for c in roster if c["id"]==cid), None)
-    if not cls: raise HTTPException(404, "Class not found")
-    s = next((s for s in cls["students"] if s["id"]==sid), None)
-    if not s: raise HTTPException(404, "Student not found")
-    # Generate unique PIN
-    used = {st.get("pin") for c in roster for st in c["students"]}
-    for _ in range(100):
-        pin = str(random.randint(10000, 99999))
-        if pin not in used:
-            s["pin"] = pin
-            _save("roster.json", roster)
-            return {"ok": True, "pin": pin}
-    raise HTTPException(500, "Could not generate unique PIN")
+# ── Fluency Drills ─────────────────────────────────────────
 
-@app.put("/roster/class/{cid}/student/{sid}/pin/set")
-def set_student_pin_manual(cid: str, sid: str, pin: str):
-    """Manually set a specific PIN for a student."""
-    if len(pin) != 5 or not pin.isdigit():
-        raise HTTPException(400, "PIN must be exactly 5 digits")
-    cls = next((c for c in roster if c["id"]==cid), None)
-    if not cls: raise HTTPException(404, "Class not found")
-    s = next((s for s in cls["students"] if s["id"]==sid), None)
-    if not s: raise HTTPException(404, "Student not found")
-    # Check uniqueness across all PINs
-    used = _all_used_pins()
-    used.discard(s.get("pin",""))  # allow keeping same PIN
-    if pin in used:
-        raise HTTPException(400, "PIN already in use")
-    s["pin"] = pin
-    _save("roster.json", roster)
-    return {"ok": True, "pin": pin}
+class FluencySession(BaseModel):
+    studentId:   str
+    studentName: str
+    classId:     Optional[str] = ""
+    className:   Optional[str] = ""
+    testCode:    Optional[str] = ""
+    levels:      dict   # {add: int, sub: int, mul: int, div: int}
+    log:         List[Any]  # [{op,level,display,answer,studentAnswer,correct}]
+    submitted:   Optional[str] = ""
+    earnings:    Optional[float] = 0.0
+
+class AvatarBuyBody(BaseModel):
+    studentId: str
+    itemId:    str
+
+class AvatarEquipBody(BaseModel):
+    studentId: str
+    equipped:  dict  # {skinTone, hairColor, hairStyle, shirt, pants, acc}
+
+@app.get("/fluency/progress/{student_id}")
+def get_fluency_progress(student_id: str):
+    """Return stored fluency levels for a student (defaults to level 1)."""
+    d = fluency_data.get(student_id, {})
+    return {
+        "add": max(1, min(10, d.get("add", 1))),
+        "sub": max(1, min(10, d.get("sub", 1))),
+        "mul": max(1, min(10, d.get("mul", 1))),
+        "div": max(1, min(10, d.get("div", 1))),
+    }
+
+@app.post("/fluency/session")
+def save_fluency_session(session: FluencySession):
+    """Save session results and update student fluency levels."""
+    sid = session.studentId
+    if not sid:
+        raise HTTPException(400, "studentId required")
+    if sid not in fluency_data:
+        fluency_data[sid] = {"add": 1, "sub": 1, "mul": 1, "div": 1, "sessions": []}
+    # Update levels
+    for op in ("add", "sub", "mul", "div"):
+        if op in session.levels:
+            fluency_data[sid][op] = max(1, min(10, int(session.levels[op])))
+    # Append session summary
+    total   = len(session.log)
+    correct = sum(1 for e in session.log if e.get("correct"))
+    if "sessions" not in fluency_data[sid]:
+        fluency_data[sid]["sessions"] = []
+    earnings = round(float(session.earnings or 0.0), 2)
+    fluency_data[sid]["sessions"].append({
+        "submitted":   session.submitted or time.strftime("%b %d, %Y %I:%M %p"),
+        "studentName": session.studentName,
+        "classId":     session.classId,
+        "className":   session.className,
+        "testCode":    session.testCode,
+        "levels":      session.levels,
+        "total":       total,
+        "correct":     correct,
+        "pct":         round(correct / total * 100) if total else 0,
+        "earnings":    earnings,
+    })
+    _save("fluency_data.json", fluency_data)
+
+    # Credit earnings to avatar balance
+    if earnings > 0 and sid:
+        if sid not in avatar_data:
+            avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
+        avatar_data[sid]["balance"] = round(
+            avatar_data[sid].get("balance", 0.0) + earnings, 2
+        )
+        _save("avatar_data.json", avatar_data)
+
+    return {"ok": True, "earnings": earnings}
+
+@app.get("/fluency/class/{cid}/report")
+def get_fluency_class_report(cid: str):
+    """Return fluency progress for every student in a class."""
+    cls = next((c for c in roster if c["id"] == cid), None)
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    result = []
+    for student in cls["students"]:
+        sid = student["id"]
+        d   = fluency_data.get(sid, {})
+        sess = d.get("sessions", [])
+        result.append({
+            "student":      {"id": sid, "name": student["name"]},
+            "levels":       {
+                "add": d.get("add", 1), "sub": d.get("sub", 1),
+                "mul": d.get("mul", 1), "div": d.get("div", 1),
+            },
+            "sessionCount": len(sess),
+            "lastSession":  sess[-1] if sess else None,
+        })
+    return result
+
+
+# ── Avatar ─────────────────────────────────────────────────
+
+@app.get("/avatar/{student_id}")
+def get_avatar(student_id: str):
+    """Return avatar state for a student (balance, owned items, equipped)."""
+    d = avatar_data.get(student_id, {})
+    return {
+        "balance":  round(d.get("balance", 0.0), 2),
+        "owned":    d.get("owned",    list(_FREE_ITEMS)),
+        "equipped": d.get("equipped", {}),
+    }
+
+@app.post("/avatar/buy")
+def buy_avatar_item(body: AvatarBuyBody):
+    """Deduct price and add item to owned list. Idempotent if already owned."""
+    sid  = body.studentId
+    item = next((it for it in _SHOP_CATALOG if it["id"] == body.itemId), None)
+    if not item:
+        raise HTTPException(404, "Item not found")
+    if sid not in avatar_data:
+        avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
+    d = avatar_data[sid]
+    if body.itemId not in d.get("owned", []):
+        price = item["price"]
+        if d.get("balance", 0.0) < price - 0.001:
+            raise HTTPException(400, "Insufficient balance")
+        d["balance"] = round(d["balance"] - price, 2)
+        d.setdefault("owned", []).append(body.itemId)
+        _save("avatar_data.json", avatar_data)
+    return {"ok": True, "balance": d["balance"], "owned": d["owned"]}
+
+@app.post("/avatar/equip")
+def equip_avatar_item(body: AvatarEquipBody):
+    """Save equipped selections for a student."""
+    sid = body.studentId
+    if sid not in avatar_data:
+        avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
+    avatar_data[sid]["equipped"] = body.equipped
+    _save("avatar_data.json", avatar_data)
+    return {"ok": True}
+
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)

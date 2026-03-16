@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+sessions.json
+roster.json
+teachers.json
+saved_tests.json
+active_test.json
