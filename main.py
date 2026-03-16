@@ -482,25 +482,6 @@ def add_students(cid: str, body: AddStudents):
     _save("roster.json", roster)
     return {"ok": True, "added": len(added), "students": added}
 
-class EmailPatch(BaseModel):
-    updates: List[dict]   # [{name, email}, ...]
-
-@app.patch("/roster/class/{cid}/backfill-emails")
-def backfill_emails(cid: str, body: EmailPatch):
-    """Set email on existing students matched by name who currently have no email."""
-    cls = next((c for c in roster if c["id"]==cid), None)
-    if not cls: raise HTTPException(404, "Class not found")
-    name_map = {u["name"].lower(): (u.get("email") or "").strip().lower() for u in body.updates}
-    patched = 0
-    for s in cls["students"]:
-        if s.get("email"):
-            continue   # already has an email — don't overwrite
-        email = name_map.get(s["name"].lower(), "")
-        if email:
-            s["email"] = email
-            patched += 1
-    _save("roster.json", roster)
-    return {"ok": True, "patched": patched}
 
 @app.delete("/roster/class/{cid}/student/{sid}")
 def remove_student(cid: str, sid: str):
