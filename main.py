@@ -13,7 +13,7 @@ import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import time, json, os, uuid, random, string, collections
+import time, json, os, uuid, random, string, collections, tempfile
 import uvicorn
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -57,9 +57,31 @@ def _path(name): return os.path.join(DATA_DIR, name)
 def _load(filename, default):
     try:
         with open(_path(filename)) as f: return json.load(f)
-    except: return default
+    except Exception as e:
+        print(f"Warning: failed to load {filename}: {e}")
+        return default
 def _save(filename, data):
-    with open(_path(filename), "w") as f: json.dump(data, f, indent=2)
+    target = _path(filename)
+    dir_name = os.path.dirname(target) or "."
+    fd, tmp = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def _strip_answers(questions):
+    """Return a copy of each question dict with the 'correct' key removed."""
+    stripped = []
+    for q in questions:
+        q_copy = {k: v for k, v in q.items() if k != "correct"}
+        stripped.append(q_copy)
+    return stripped
 
 def gen_code():
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -180,13 +202,22 @@ def submit_session(session: Session):
     return {"ok": True}
 
 @app.get("/test/attempt-check")
-def check_attempt(code: str, studentId: str = ""):
+def check_attempt(code: str, studentId: str = "", studentName: str = ""):
     """Return whether a student has already submitted this test code."""
     code = code.strip().upper()
-    already = any(
-        s.get("testCode","").upper() == code and studentId and s.get("studentId","") == studentId
-        for s in sessions
-    )
+    if studentId:
+        already = any(
+            s.get("testCode","").upper() == code and s.get("studentId","") == studentId
+            for s in sessions
+        )
+    elif studentName:
+        name_lower = studentName.strip().lower()
+        already = any(
+            s.get("testCode","").upper() == code and s.get("studentName","").strip().lower() == name_lower
+            for s in sessions
+        )
+    else:
+        already = False
     return {"attempted": already}
 
 @app.get("/sessions")
@@ -310,7 +341,7 @@ def get_test_by_code(code: str):
         return {"found": False}
     return {
         "found":          True,
-        "questions":      match.get("questions", []),
+        "questions":      _strip_answers(match.get("questions", [])),
         "title":          match.get("title", match.get("name", "")),
         "code":           code,
         "adaptive":       match.get("adaptive", False),
@@ -822,10 +853,19 @@ def save_fluency_session(session: FluencySession):
         raise HTTPException(400, "studentId required")
     if sid not in fluency_data:
         fluency_data[sid] = {"add": 1, "sub": 1, "mul": 1, "div": 1, "sessions": []}
-    # Update levels
+    # Update levels — validate that the client-provided level only changed by ±1
     for op in ("add", "sub", "mul", "div"):
         if op in session.levels:
-            fluency_data[sid][op] = max(1, min(10, int(session.levels[op])))
+            stored = fluency_data[sid].get(op, 1)
+            requested = max(1, min(10, int(session.levels[op])))
+            if abs(requested - stored) <= 1:
+                fluency_data[sid][op] = requested
+            else:
+                # Client sent a level more than ±1 away; clamp to ±1
+                if requested > stored:
+                    fluency_data[sid][op] = min(10, stored + 1)
+                else:
+                    fluency_data[sid][op] = max(1, stored - 1)
     # Append session summary
     total   = len(session.log)
     correct = sum(1 for e in session.log if e.get("correct"))
