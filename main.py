@@ -98,23 +98,6 @@ saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
 teachers      = _load("teachers.json",   [])   # list of {id, name, pin, classIds:[]}
 fluency_data  = _load("fluency_data.json", {})  # {studentId: {add,sub,mul,div, sessions:[]}}
-avatar_data   = _load("avatar_data.json",  {})  # {studentId: {balance, owned:[], equipped:{}}}
-
-_FREE_ITEMS = ["hair_basic","shirt_white","pants_blue","acc_none"]
-_SHOP_CATALOG = [
-    {"id":"hair_basic","price":0.00},{"id":"hair_curly","price":0.25},
-    {"id":"hair_spiky","price":0.35},{"id":"hair_bun","price":0.50},
-    {"id":"hair_long","price":0.45},{"id":"hair_pigtails","price":0.60},
-    {"id":"shirt_white","price":0.00},{"id":"shirt_red","price":0.20},
-    {"id":"shirt_blue","price":0.20},{"id":"shirt_green","price":0.20},
-    {"id":"shirt_purple","price":0.30},{"id":"shirt_yellow","price":0.25},
-    {"id":"pants_blue","price":0.00},{"id":"pants_black","price":0.25},
-    {"id":"pants_khaki","price":0.25},{"id":"pants_red","price":0.35},
-    {"id":"pants_gray","price":0.20},
-    {"id":"acc_none","price":0.00},{"id":"acc_glasses","price":0.40},
-    {"id":"acc_crown","price":1.00},{"id":"acc_bow","price":0.55},
-    {"id":"acc_hat","price":0.75},
-]
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
@@ -796,15 +779,6 @@ class FluencySession(BaseModel):
     levels:      dict   # {add: int, sub: int, mul: int, div: int}
     log:         List[Any]  # [{op,level,display,answer,studentAnswer,correct}]
     submitted:   Optional[str] = ""
-    earnings:    Optional[float] = 0.0
-
-class AvatarBuyBody(BaseModel):
-    studentId: str
-    itemId:    str
-
-class AvatarEquipBody(BaseModel):
-    studentId: str
-    equipped:  dict  # {skinTone, hairColor, hairStyle, shirt, pants, acc}
 
 @app.get("/fluency/progress/{student_id}")
 def get_fluency_progress(student_id: str):
@@ -834,7 +808,6 @@ def save_fluency_session(session: FluencySession):
     correct = sum(1 for e in session.log if e.get("correct"))
     if "sessions" not in fluency_data[sid]:
         fluency_data[sid]["sessions"] = []
-    earnings = round(float(session.earnings or 0.0), 2)
     fluency_data[sid]["sessions"].append({
         "submitted":   session.submitted or time.strftime("%b %d, %Y %I:%M %p"),
         "studentName": session.studentName,
@@ -845,20 +818,9 @@ def save_fluency_session(session: FluencySession):
         "total":       total,
         "correct":     correct,
         "pct":         round(correct / total * 100) if total else 0,
-        "earnings":    earnings,
     })
     _save("fluency_data.json", fluency_data)
-
-    # Credit earnings to avatar balance
-    if earnings > 0 and sid:
-        if sid not in avatar_data:
-            avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
-        avatar_data[sid]["balance"] = round(
-            avatar_data[sid].get("balance", 0.0) + earnings, 2
-        )
-        _save("avatar_data.json", avatar_data)
-
-    return {"ok": True, "earnings": earnings}
+    return {"ok": True}
 
 @app.get("/fluency/class/{cid}/report")
 def get_fluency_class_report(cid: str):
@@ -881,48 +843,6 @@ def get_fluency_class_report(cid: str):
             "lastSession":  sess[-1] if sess else None,
         })
     return result
-
-
-# ── Avatar ─────────────────────────────────────────────────
-
-@app.get("/avatar/{student_id}")
-def get_avatar(student_id: str):
-    """Return avatar state for a student (balance, owned items, equipped)."""
-    d = avatar_data.get(student_id, {})
-    return {
-        "balance":  round(d.get("balance", 0.0), 2),
-        "owned":    d.get("owned",    list(_FREE_ITEMS)),
-        "equipped": d.get("equipped", {}),
-    }
-
-@app.post("/avatar/buy")
-def buy_avatar_item(body: AvatarBuyBody):
-    """Deduct price and add item to owned list. Idempotent if already owned."""
-    sid  = body.studentId
-    item = next((it for it in _SHOP_CATALOG if it["id"] == body.itemId), None)
-    if not item:
-        raise HTTPException(404, "Item not found")
-    if sid not in avatar_data:
-        avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
-    d = avatar_data[sid]
-    if body.itemId not in d.get("owned", []):
-        price = item["price"]
-        if d.get("balance", 0.0) < price - 0.001:
-            raise HTTPException(400, "Insufficient balance")
-        d["balance"] = round(d["balance"] - price, 2)
-        d.setdefault("owned", []).append(body.itemId)
-        _save("avatar_data.json", avatar_data)
-    return {"ok": True, "balance": d["balance"], "owned": d["owned"]}
-
-@app.post("/avatar/equip")
-def equip_avatar_item(body: AvatarEquipBody):
-    """Save equipped selections for a student."""
-    sid = body.studentId
-    if sid not in avatar_data:
-        avatar_data[sid] = {"balance": 0.0, "owned": list(_FREE_ITEMS), "equipped": {}}
-    avatar_data[sid]["equipped"] = body.equipped
-    _save("avatar_data.json", avatar_data)
-    return {"ok": True}
 
 
 if __name__ == "__main__":
