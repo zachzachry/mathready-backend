@@ -713,9 +713,37 @@ def google_teacher_verify(body: GoogleVerifyBody):
 # ── Auth (hex login codes) ────────────────────────────────
 ADMIN_PIN = os.environ.get("ADMIN_PIN", "")   # empty = disabled until set in Railway
 
+def _match_student(info: dict, classes_to_search: list):
+    """Match a verified Google token to a roster student.
+    Priority: googleSub → name.
+    On first name-match, saves the sub so future logins are instant.
+    Returns (student, cls) or (None, None).
+    """
+    sub     = info.get("sub", "")
+    gc_name = (info.get("name") or "").strip().lower()
+
+    # 1. Sub match — returning user, bulletproof
+    for cls in classes_to_search:
+        for s in cls["students"]:
+            if sub and s.get("googleSub") == sub:
+                return s, cls
+
+    # 2. Name match — first login; write sub so next time is instant
+    if gc_name:
+        for cls in classes_to_search:
+            for s in cls["students"]:
+                if s["name"].strip().lower() == gc_name:
+                    if sub and not s.get("googleSub"):
+                        s["googleSub"] = sub
+                        _save("roster.json", roster)
+                    return s, cls
+
+    return None, None
+
+
 @app.post("/auth/google/verify")
 def google_verify(body: GoogleVerifyBody):
-    """Verify a Google ID token and match the email to the roster."""
+    """Verify a Google ID token and match to the roster for tests/practice."""
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(500, "Google auth not configured on server.")
     try:
@@ -725,11 +753,6 @@ def google_verify(body: GoogleVerifyBody):
     except Exception as e:
         raise HTTPException(401, f"Invalid Google token: {e}")
 
-    email = (info.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(401, "No email in token.")
-
-    # Find matching classes to search
     if body.classId:
         classes_to_search = [c for c in roster if c["id"] == body.classId]
     elif body.code:
@@ -742,24 +765,15 @@ def google_verify(body: GoogleVerifyBody):
     else:
         raise HTTPException(400, "Provide code or classId.")
 
-    # Match by email first, fall back to full name from Google token
-    gc_name = (info.get("name") or "").strip().lower()
-    for cls in classes_to_search:
-        for s in cls["students"]:
-            if email and (s.get("email") or "").lower().strip() == email:
-                return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
-    if gc_name:
-        for cls in classes_to_search:
-            for s in cls["students"]:
-                if s["name"].strip().lower() == gc_name:
-                    return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
-
+    student, cls = _match_student(info, classes_to_search)
+    if student:
+        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"]}}
     raise HTTPException(403, "Your Google account is not on the class roster. Check with your teacher.")
 
 
 @app.post("/auth/google/drill")
 def google_drill_auth(body: GoogleVerifyBody):
-    """Verify Google token for fluency drill. Student must be on the class roster."""
+    """Verify Google token for fluency drill."""
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(500, "Google auth not configured on server.")
     try:
@@ -769,21 +783,10 @@ def google_drill_auth(body: GoogleVerifyBody):
     except Exception as e:
         raise HTTPException(401, f"Invalid Google token: {e}")
 
-    email   = (info.get("email") or "").lower().strip()
-    gc_name = (info.get("name")  or "").strip().lower()
-
-    # Match by email first, fall back to full name from Google token
-    for cls in roster:
-        for s in cls["students"]:
-            if email and (s.get("email") or "").lower().strip() == email:
-                return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
-    if gc_name:
-        for cls in roster:
-            for s in cls["students"]:
-                if s["name"].strip().lower() == gc_name:
-                    return {"ok": True, "student": s, "cls": {"id": cls["id"], "name": cls["name"]}}
-
-    raise HTTPException(403, "Your Google account is not on a class roster. Ask your teacher to add your email.")
+    student, cls = _match_student(info, roster)
+    if student:
+        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"]}}
+    raise HTTPException(403, "Your Google account is not on a class roster. Ask your teacher to add you.")
 
 
 @app.get("/auth/pin/{pin}")
