@@ -7,13 +7,13 @@ from dotenv import load_dotenv
 import os as _os
 load_dotenv(dotenv_path=_os.path.join(_os.path.dirname(__file__), ".env"))
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import time, json, os, uuid, random, string, collections, tempfile
+import time, json, os, uuid, random, string, tempfile
 import uvicorn
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -35,21 +35,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Rate limiting — auth endpoint ─────────────────────────
-# Sliding window: max 10 attempts per IP per 5 minutes
-_auth_attempts: dict = collections.defaultdict(list)
-AUTH_WINDOW  = 300   # seconds
-AUTH_MAX     = 10    # attempts per window
-
-def _check_rate_limit(ip: str):
-    now = time.time()
-    attempts = _auth_attempts[ip]
-    # Drop attempts outside the window
-    _auth_attempts[ip] = [t for t in attempts if now - t < AUTH_WINDOW]
-    if len(_auth_attempts[ip]) >= AUTH_MAX:
-        return False
-    _auth_attempts[ip].append(now)
-    return True
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
@@ -118,7 +103,7 @@ def _next_question_id():
 active_test   = _load("active_test.json", {"questions": [], "title": "Practice Test"})
 saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
-teachers      = _load("teachers.json",   [])   # list of {id, name, pin, classIds:[]}
+teachers      = _load("teachers.json",   [])   # list of {id, name, email, role, classIds:[]}
 fluency_data  = _load("fluency_data.json", {})  # {studentId: {add,sub,mul,div, sessions:[]}}
 
 # ── Models ─────────────────────────────────────────────────
@@ -179,11 +164,10 @@ class NewClass(BaseModel):
     gcCourseId: Optional[str] = None
 
 class AddStudents(BaseModel):
-    students: List[str]  # list of names (one or many)
+    students: List[Any]  # list of name strings OR {name, email} dicts
 
 class NewTeacher(BaseModel):
     name: str
-    pin:  str = ""
     email: Optional[str] = None
     role: Optional[str] = "teacher"   # super_admin | school_admin | teacher | observer
     classIds: Optional[List[str]] = []
@@ -476,7 +460,7 @@ def update_class(cid: str, body: UpdateClass):
         for s in body.students:
             sid = s.get("id")
             base = existing.get(sid, {})
-            base.update({k: v for k, v in s.items() if k in ("extendedTime", "reduceChoices", "name", "pin", "email")})
+            base.update({k: v for k, v in s.items() if k in ("extendedTime", "reduceChoices", "name")})
             merged.append(base)
         cls["students"] = merged
     _save("roster.json", roster)
@@ -487,6 +471,14 @@ def delete_class(cid: str):
     global roster
     roster = [c for c in roster if c["id"] != cid]
     _save("roster.json", roster)
+    # Remove this class from all teachers' assignments
+    changed = False
+    for t in teachers:
+        if cid in (t.get("classIds") or []):
+            t["classIds"] = [c for c in t["classIds"] if c != cid]
+            changed = True
+    if changed:
+        _save("teachers.json", teachers)
     return {"ok": True}
 
 @app.post("/roster/class/{cid}/students")
@@ -626,22 +618,14 @@ def get_teachers():
     return [{"id":t["id"],"name":t["name"],"classIds":t.get("classIds",[]),
              "email": t.get("email",""),
              "role":  t.get("role","teacher"),
-             "pinSet": bool(t.get("pin"))} for t in teachers]
+             } for t in teachers]
 
 @app.post("/teachers")
 def create_teacher(body: NewTeacher):
     t = {"id": "t" + uuid.uuid4().hex[:8], "name": body.name.strip(),
          "email": (body.email or "").lower().strip(),
          "role": body.role or "teacher",
-         "pin": "", "classIds": body.classIds or []}
-    if body.pin:
-        code = body.pin.strip().upper()
-        if len(code) < 4 or len(code) > 8 or not all(c in "0123456789ABCDEF" for c in code):
-            raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
-        used = _all_used_pins()
-        if code in used:
-            raise HTTPException(400, "PIN already in use")
-        t["pin"] = code
+         "classIds": body.classIds or []}
     teachers.append(t)
     _save("teachers.json", teachers)
     return {"ok": True, "id": t["id"]}
@@ -650,14 +634,6 @@ def create_teacher(body: NewTeacher):
 def update_teacher(tid: str, body: NewTeacher):
     t = next((t for t in teachers if t["id"]==tid), None)
     if not t: raise HTTPException(404, "Teacher not found")
-    if body.pin:
-        new_pin = body.pin.strip().upper()
-        if len(new_pin) < 4 or len(new_pin) > 8 or not all(c in "0123456789ABCDEF" for c in new_pin):
-            raise HTTPException(400, "Login code must be 4–8 hex characters (0-9, A-F)")
-        used = _all_used_pins(exclude_teacher=tid)
-        if new_pin in used:
-            raise HTTPException(400, "PIN already in use")
-        t["pin"] = new_pin
     t["name"]     = body.name.strip()
     t["classIds"] = body.classIds or []
     if body.email is not None:
@@ -683,13 +659,6 @@ def set_teacher_classes(tid: str, body: AddStudents):
     _save("teachers.json", teachers)
     return {"ok": True}
 
-def _all_used_pins(exclude_teacher=None):
-    used = set()
-    used.add(ADMIN_PIN)
-    for t in teachers:
-        if t["id"] != exclude_teacher:
-            used.add(t.get("pin",""))
-    return used
 
 
 class GoogleVerifyBody(BaseModel):
@@ -722,8 +691,6 @@ def google_teacher_verify(body: GoogleVerifyBody):
         "classIds":    t.get("classIds", []),
     }
 
-# ── Auth (hex login codes) ────────────────────────────────
-ADMIN_PIN = os.environ.get("ADMIN_PIN", "")   # empty = disabled until set in Railway
 
 def _match_student(info: dict, classes_to_search: list):
     """Match a verified Google token to a roster student.
@@ -798,29 +765,18 @@ def google_drill_auth(body: GoogleVerifyBody):
     student, cls = _match_student(info, roster)
     if student:
         return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"]}}
+
+    # Allow teachers (especially super_admin) to drill without being on a roster
+    email = (info.get("email") or "").lower().strip()
+    t = next((t for t in teachers if (t.get("email") or "").lower().strip() == email), None)
+    if t:
+        fake_student = {"id": t["id"], "name": t["name"]}
+        first_class = roster[0] if roster else {"id": "demo", "name": "Demo"}
+        return {"ok": True, "student": fake_student, "cls": {"id": first_class["id"], "name": first_class.get("name", "Demo")}}
+
     raise HTTPException(403, "Your Google account is not on a class roster. Ask your teacher to add you.")
 
 
-@app.get("/auth/pin/{pin}")
-def auth_pin(pin: str, request: Request):
-    """Resolve a hex login code to a role + identity."""
-    ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(ip):
-        raise HTTPException(429, "Too many attempts. Please wait 5 minutes.")
-    pin = pin.strip().upper()
-    if pin == ADMIN_PIN and ADMIN_PIN:
-        return {"role": "admin"}
-    # Check teacher accounts
-    for t in teachers:
-        if t.get("pin") == pin:
-            return {
-                "role":        "teacher",
-                "teacherRole": t.get("role", "teacher"),
-                "teacherId":   t["id"],
-                "teacherName": t["name"],
-                "classIds":    t.get("classIds", []),
-            }
-    return {"role": "unknown"}
 
 # ── Fluency Drills ─────────────────────────────────────────
 
@@ -909,4 +865,5 @@ def get_fluency_class_report(cid: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True,
+                reload_dirs=[os.path.dirname(os.path.abspath(__file__))])
