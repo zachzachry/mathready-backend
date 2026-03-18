@@ -64,9 +64,52 @@ def _strip_answers(questions):
     """Return a copy of each question dict with the 'correct' key removed."""
     stripped = []
     for q in questions:
-        q_copy = {k: v for k, v in q.items() if k != "correct"}
+        q_copy = {k: v for k, v in q.items() if k not in ("correct", "answer")}
         stripped.append(q_copy)
     return stripped
+
+
+def _grade_answer(q, given):
+    """Server-side grading — mirrors frontend gradeAnswer() but has access to full answer key."""
+    if given is None or given == "":
+        return False
+    qtype = q.get("type", "")
+    correct_val = q.get("answer") or q.get("correct")
+    if correct_val is None:
+        return False
+    if qtype == "plotpoint":
+        ans = correct_val if isinstance(correct_val, list) else json.loads(correct_val)
+        return given == json.dumps(ans)
+    if qtype == "multiselect":
+        correct_list = correct_val if isinstance(correct_val, list) else []
+        try:
+            given_list = json.loads(given) if isinstance(given, str) else given
+            return sorted(given_list) == sorted(correct_list)
+        except Exception:
+            return False
+    if qtype == "keypad":
+        return str(correct_val).strip().lower() == str(given).strip().lower()
+    # Default: MCQ — exact string match
+    return str(given).strip() == str(correct_val).strip()
+
+
+def _server_score(test_code, answers):
+    """Look up saved test by code, grade all answers server-side. Returns (score, total) or None."""
+    if not test_code:
+        return None
+    code_upper = test_code.strip().upper()
+    test = next((t for t in saved_tests if t.get("code", "").upper() == code_upper), None)
+    if not test:
+        return None
+    questions = test.get("questions", [])
+    total = len(questions)
+    score = 0
+    for q in questions:
+        qid = q.get("id", "")
+        given = answers.get(qid)
+        if _grade_answer(q, given):
+            score += 1
+    return score, total
 
 def gen_code():
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -181,9 +224,18 @@ def root():
 # ── Sessions (append model) ────────────────────────────────
 @app.post("/submit")
 def submit_session(session: Session):
-    sessions.append(session.dict())
+    d = session.dict()
+    # Server-side re-score: override client-computed score to prevent tampering
+    # and fix the bug where _strip_answers removes 'correct' before client can grade
+    result = _server_score(d.get("testCode"), d.get("answers", {}))
+    if result:
+        score, total = result
+        d["score"] = score
+        d["total"] = total
+        d["pct"] = round(score / total * 100) if total else 0
+    sessions.append(d)
     _save("sessions.json", sessions)
-    return {"ok": True}
+    return {"ok": True, "score": d["score"], "total": d["total"], "pct": d["pct"]}
 
 @app.get("/test/attempt-check")
 def check_attempt(code: str, studentId: str = "", studentName: str = ""):
@@ -206,8 +258,10 @@ def check_attempt(code: str, studentId: str = "", studentName: str = ""):
 
 @app.get("/sessions")
 def get_sessions(classIds: Optional[str] = None):
-    if classIds is None or classIds.strip() == "":
-        return sessions
+    if classIds is None:
+        return sessions  # Admin: no filter
+    if classIds.strip() == "":
+        return []  # Teacher with no classes: empty, not all
     ids = {i for i in classIds.split(",") if i.strip()}
     if not ids:
         return []
@@ -411,8 +465,10 @@ def delete_saved_test(tid: str):
 # ── Roster ─────────────────────────────────────────────────
 @app.get("/roster")
 def get_roster(classIds: Optional[str] = None):
-    if classIds is None or classIds.strip() == "":
-        return roster
+    if classIds is None:
+        return roster  # Admin: no filter
+    if classIds.strip() == "":
+        return []  # Teacher with no classes: empty, not all
     ids = {i for i in classIds.split(",") if i.strip()}
     if not ids:
         return []
@@ -426,7 +482,7 @@ def get_class(cid: str):
 
 @app.post("/roster/class")
 def create_class(body: NewClass):
-    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": [], "gcCourseId": body.gcCourseId}
+    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": [], "gcCourseId": body.gcCourseId, "hideTimer": True}
     roster.append(cls)
     _save("roster.json", roster)
     # Link to teacher if provided
@@ -444,6 +500,7 @@ class UpdateClass(BaseModel):
     name: Optional[str] = None
     students: Optional[List[Any]] = None  # full student objects with accommodations
     gcCourseId: Optional[str] = None
+    hideTimer: Optional[bool] = None
 
 @app.put("/roster/class/{cid}")
 def update_class(cid: str, body: UpdateClass):
@@ -453,6 +510,8 @@ def update_class(cid: str, body: UpdateClass):
         cls["name"] = body.name.strip()
     if body.gcCourseId is not None:
         cls["gcCourseId"] = body.gcCourseId
+    if body.hideTimer is not None:
+        cls["hideTimer"] = body.hideTimer
     if body.students is not None:
         # Merge accommodations into existing student records
         existing = {s["id"]: s for s in cls["students"]}
@@ -764,7 +823,7 @@ def google_drill_auth(body: GoogleVerifyBody):
 
     student, cls = _match_student(info, roster)
     if student:
-        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"]}}
+        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"], "hideTimer": cls.get("hideTimer", True)}}
 
     # Allow teachers (especially super_admin) to drill without being on a roster
     email = (info.get("email") or "").lower().strip()
@@ -792,13 +851,17 @@ class FluencySession(BaseModel):
 
 @app.get("/fluency/progress/{student_id}")
 def get_fluency_progress(student_id: str):
-    """Return stored fluency levels for a student (defaults to level 1)."""
+    """Return stored fluency levels, personal bests, and session history for a student."""
     d = fluency_data.get(student_id, {})
+    sess = d.get("sessions", [])
+    pb = d.get("personalBests", {"bestAccuracy": 0, "bestPPM": 0})
     return {
         "add": max(1, min(10, d.get("add", 1))),
         "sub": max(1, min(10, d.get("sub", 1))),
         "mul": max(1, min(10, d.get("mul", 1))),
         "div": max(1, min(10, d.get("div", 1))),
+        "personalBests": pb,
+        "sessions": [{"levels": s.get("levels", {}), "pct": s.get("pct", 0), "submitted": s.get("submitted", "")} for s in sess[-20:]],
     }
 
 @app.post("/fluency/session")
@@ -827,6 +890,8 @@ def save_fluency_session(session: FluencySession):
     correct = sum(1 for e in session.log if e.get("correct"))
     if "sessions" not in fluency_data[sid]:
         fluency_data[sid]["sessions"] = []
+    pct = round(correct / total * 100) if total else 0
+    ppm = round(total / 3, 1)  # 3-minute drill
     fluency_data[sid]["sessions"].append({
         "submitted":   session.submitted or time.strftime("%b %d, %Y %I:%M %p"),
         "studentName": session.studentName,
@@ -836,10 +901,20 @@ def save_fluency_session(session: FluencySession):
         "levels":      session.levels,
         "total":       total,
         "correct":     correct,
-        "pct":         round(correct / total * 100) if total else 0,
+        "pct":         pct,
     })
+    # Track personal bests
+    if "personalBests" not in fluency_data[sid]:
+        fluency_data[sid]["personalBests"] = {"bestAccuracy": 0, "bestPPM": 0}
+    pb = fluency_data[sid]["personalBests"]
+    new_best_accuracy = pct > pb.get("bestAccuracy", 0)
+    new_best_ppm = ppm > pb.get("bestPPM", 0)
+    if new_best_accuracy:
+        pb["bestAccuracy"] = pct
+    if new_best_ppm:
+        pb["bestPPM"] = ppm
     _save("fluency_data.json", fluency_data)
-    return {"ok": True}
+    return {"ok": True, "newBestAccuracy": new_best_accuracy, "newBestPPM": new_best_ppm, "pct": pct, "ppm": ppm}
 
 @app.get("/fluency/class/{cid}/report")
 def get_fluency_class_report(cid: str):
@@ -852,6 +927,25 @@ def get_fluency_class_report(cid: str):
         sid = student["id"]
         d   = fluency_data.get(sid, {})
         sess = d.get("sessions", [])
+        pcts = [s.get("pct", 0) for s in sess if s.get("pct") is not None]
+        avg_accuracy = round(sum(pcts) / len(pcts)) if pcts else 0
+        # Trend: compare last 3 sessions avg vs prior 3
+        trend = "stable"
+        if len(pcts) >= 6:
+            recent = sum(pcts[-3:]) / 3
+            prior  = sum(pcts[-6:-3]) / 3
+            if recent > prior + 5:
+                trend = "improving"
+            elif recent < prior - 5:
+                trend = "declining"
+        elif len(pcts) >= 3:
+            recent = sum(pcts[-3:]) / 3
+            prior  = sum(pcts[:-3]) / max(1, len(pcts) - 3) if len(pcts) > 3 else pcts[0]
+            if recent > prior + 5:
+                trend = "improving"
+            elif recent < prior - 5:
+                trend = "declining"
+        pb = d.get("personalBests", {"bestAccuracy": 0, "bestPPM": 0})
         result.append({
             "student":      {"id": sid, "name": student["name"]},
             "levels":       {
@@ -859,9 +953,37 @@ def get_fluency_class_report(cid: str):
                 "mul": d.get("mul", 1), "div": d.get("div", 1),
             },
             "sessionCount": len(sess),
+            "avgAccuracy":  avg_accuracy,
+            "trend":        trend,
+            "personalBests": pb,
             "lastSession":  sess[-1] if sess else None,
         })
     return result
+
+
+@app.get("/fluency/class/{cid}/leaderboard")
+def get_fluency_leaderboard(cid: str):
+    """Return Top 5 students by best accuracy for a class."""
+    cls = next((c for c in roster if c["id"] == cid), None)
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    entries = []
+    for student in cls["students"]:
+        sid = student["id"]
+        d = fluency_data.get(sid, {})
+        pb = d.get("personalBests", {})
+        best_acc = pb.get("bestAccuracy", 0)
+        best_ppm = pb.get("bestPPM", 0)
+        sess_count = len(d.get("sessions", []))
+        if sess_count > 0:
+            entries.append({
+                "studentName": student["name"],
+                "bestAccuracy": best_acc,
+                "bestPPM": best_ppm,
+                "sessionCount": sess_count,
+            })
+    entries.sort(key=lambda x: x["bestAccuracy"], reverse=True)
+    return entries[:5]
 
 
 if __name__ == "__main__":
