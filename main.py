@@ -1059,6 +1059,40 @@ def get_fluency_leaderboard(cid: str):
     return entries[:5]
 
 
+# ── Fluency Data Reset ─────────────────────────────────────
+@app.delete("/fluency/student/{student_id}")
+def reset_fluency_student(student_id: str):
+    """Reset a single student's fluency data (levels, sessions, streaks)."""
+    if student_id in fluency_data:
+        del fluency_data[student_id]
+        _save("fluency_data.json", fluency_data)
+        return {"ok": True, "message": f"Fluency data cleared for student {student_id}"}
+    raise HTTPException(404, "No fluency data found for this student")
+
+@app.delete("/fluency/class/{cid}")
+def reset_fluency_class(cid: str):
+    """Reset fluency data for all students in a class."""
+    cls = next((c for c in roster if c["id"] == cid), None)
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    count = 0
+    for student in cls["students"]:
+        sid = student["id"]
+        if sid in fluency_data:
+            del fluency_data[sid]
+            count += 1
+    _save("fluency_data.json", fluency_data)
+    return {"ok": True, "message": f"Fluency data cleared for {count} students in {cls['name']}"}
+
+@app.delete("/fluency/all")
+def reset_fluency_all():
+    """Reset ALL fluency data school-wide."""
+    count = len(fluency_data)
+    fluency_data.clear()
+    _save("fluency_data.json", fluency_data)
+    return {"ok": True, "message": f"All fluency data cleared ({count} students)"}
+
+
 # ── Parent Report ───────────────────────────────────────────
 
 @app.get("/fluency/report/{student_id}")
