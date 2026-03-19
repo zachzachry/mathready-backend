@@ -848,6 +848,7 @@ class FluencySession(BaseModel):
     levels:      dict   # {add: int, sub: int, mul: int, div: int}
     log:         List[Any]  # [{op,level,display,answer,studentAnswer,correct}]
     submitted:   Optional[str] = ""
+    stars:       Optional[int] = 0  # 1-5 stars from frontend accuracy thresholds
 
 @app.get("/fluency/progress/{student_id}")
 def get_fluency_progress(student_id: str):
@@ -860,8 +861,20 @@ def get_fluency_progress(student_id: str):
         "sub": max(1, min(10, d.get("sub", 1))),
         "mul": max(1, min(10, d.get("mul", 1))),
         "div": max(1, min(10, d.get("div", 1))),
-        "personalBests": pb,
-        "sessions": [{"levels": s.get("levels", {}), "pct": s.get("pct", 0), "submitted": s.get("submitted", "")} for s in sess[-20:]],
+        "personalBests":  pb,
+        "streakDays":     d.get("streakDays", 0),
+        "lastDrillDate":  d.get("lastDrillDate", ""),
+        "sessions": [
+            {
+                "levels":    s.get("levels", {}),
+                "pct":       s.get("pct", 0),
+                "ppm":       s.get("ppm"),
+                "stars":     s.get("stars"),
+                "ops":       s.get("ops"),
+                "submitted": s.get("submitted", ""),
+            }
+            for s in sess[-20:]
+        ],
     }
 
 @app.post("/fluency/session")
@@ -885,13 +898,43 @@ def save_fluency_session(session: FluencySession):
                     fluency_data[sid][op] = min(10, stored + 1)
                 else:
                     fluency_data[sid][op] = max(1, stored - 1)
-    # Append session summary
+    # ── Per-operation breakdown from log ──────────────────────
+    ops = {op: {"total": 0, "correct": 0} for op in ("add", "sub", "mul", "div")}
+    for entry in session.log:
+        op = entry.get("op", "")
+        if op in ops:
+            ops[op]["total"] += 1
+            if entry.get("correct"):
+                ops[op]["correct"] += 1
+    for op, data in ops.items():
+        data["pct"] = round(data["correct"] / data["total"] * 100) if data["total"] else None
+
+    # ── Aggregate totals ───────────────────────────────────────
     total   = len(session.log)
     correct = sum(1 for e in session.log if e.get("correct"))
     if "sessions" not in fluency_data[sid]:
         fluency_data[sid]["sessions"] = []
     pct = round(correct / total * 100) if total else 0
     ppm = round(total / 3, 1)  # 3-minute drill
+    stars = max(1, min(5, int(session.stars or 0))) if session.stars else (
+        5 if pct >= 90 else 4 if pct >= 75 else 3 if pct >= 60 else 2 if pct >= 40 else 1
+    )
+
+    # ── Practice streak ────────────────────────────────────────
+    import datetime as _dt
+    today_str = _dt.date.today().isoformat()
+    last_date = fluency_data[sid].get("lastDrillDate", "")
+    yesterday_str = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
+    if last_date == today_str:
+        streak = fluency_data[sid].get("streakDays", 1)          # already drilled today
+    elif last_date == yesterday_str:
+        streak = fluency_data[sid].get("streakDays", 0) + 1      # consecutive day
+    else:
+        streak = 1                                                 # gap or first drill
+    fluency_data[sid]["streakDays"]   = streak
+    fluency_data[sid]["lastDrillDate"] = today_str
+
+    # ── Append session record ──────────────────────────────────
     fluency_data[sid]["sessions"].append({
         "submitted":   session.submitted or time.strftime("%b %d, %Y %I:%M %p"),
         "studentName": session.studentName,
@@ -902,19 +945,32 @@ def save_fluency_session(session: FluencySession):
         "total":       total,
         "correct":     correct,
         "pct":         pct,
+        "ppm":         ppm,
+        "stars":       stars,
+        "ops":         ops,   # {add:{total,correct,pct}, sub:…, mul:…, div:…}
     })
-    # Track personal bests
+
+    # ── Personal bests ─────────────────────────────────────────
     if "personalBests" not in fluency_data[sid]:
-        fluency_data[sid]["personalBests"] = {"bestAccuracy": 0, "bestPPM": 0}
+        fluency_data[sid]["personalBests"] = {"bestAccuracy": 0, "bestPPM": 0, "bestStars": 0}
     pb = fluency_data[sid]["personalBests"]
-    new_best_accuracy = pct > pb.get("bestAccuracy", 0)
-    new_best_ppm = ppm > pb.get("bestPPM", 0)
-    if new_best_accuracy:
-        pb["bestAccuracy"] = pct
-    if new_best_ppm:
-        pb["bestPPM"] = ppm
+    new_best_accuracy = pct  > pb.get("bestAccuracy", 0)
+    new_best_ppm      = ppm  > pb.get("bestPPM", 0)
+    new_best_stars    = stars > pb.get("bestStars", 0)
+    if new_best_accuracy: pb["bestAccuracy"] = pct
+    if new_best_ppm:      pb["bestPPM"]      = ppm
+    if new_best_stars:    pb["bestStars"]    = stars
+
     _save("fluency_data.json", fluency_data)
-    return {"ok": True, "newBestAccuracy": new_best_accuracy, "newBestPPM": new_best_ppm, "pct": pct, "ppm": ppm}
+    return {
+        "ok": True,
+        "newBestAccuracy": new_best_accuracy,
+        "newBestPPM":      new_best_ppm,
+        "pct":             pct,
+        "ppm":             ppm,
+        "stars":           stars,
+        "streak":          streak,
+    }
 
 @app.get("/fluency/class/{cid}/report")
 def get_fluency_class_report(cid: str):
@@ -945,7 +1001,20 @@ def get_fluency_class_report(cid: str):
                 trend = "improving"
             elif recent < prior - 5:
                 trend = "declining"
-        pb = d.get("personalBests", {"bestAccuracy": 0, "bestPPM": 0})
+        pb = d.get("personalBests", {"bestAccuracy": 0, "bestPPM": 0, "bestStars": 0})
+
+        # Per-operation averages across all sessions that have ops data
+        op_totals = {op: {"total": 0, "correct": 0} for op in ("add", "sub", "mul", "div")}
+        for s in sess:
+            for op, data in (s.get("ops") or {}).items():
+                if op in op_totals:
+                    op_totals[op]["total"]   += data.get("total", 0)
+                    op_totals[op]["correct"] += data.get("correct", 0)
+        op_avgs = {
+            op: round(v["correct"] / v["total"] * 100) if v["total"] else None
+            for op, v in op_totals.items()
+        }
+
         result.append({
             "student":      {"id": sid, "name": student["name"]},
             "levels":       {
@@ -956,6 +1025,9 @@ def get_fluency_class_report(cid: str):
             "avgAccuracy":  avg_accuracy,
             "trend":        trend,
             "personalBests": pb,
+            "opAvgs":       op_avgs,   # {add: 92, sub: 87, mul: 74, div: null}
+            "streakDays":   d.get("streakDays", 0),
+            "lastDrillDate": d.get("lastDrillDate", ""),
             "lastSession":  sess[-1] if sess else None,
         })
     return result
@@ -984,6 +1056,135 @@ def get_fluency_leaderboard(cid: str):
             })
     entries.sort(key=lambda x: x["bestAccuracy"], reverse=True)
     return entries[:5]
+
+
+# ── Parent Report ───────────────────────────────────────────
+
+@app.get("/fluency/report/{student_id}")
+def get_parent_report(student_id: str):
+    """
+    Parent-facing fluency report for a single student.
+    Returns all data needed to render a printable progress report.
+    """
+    d = fluency_data.get(student_id)
+    if not d:
+        raise HTTPException(404, "No fluency data found for this student")
+
+    sess = d.get("sessions", [])
+    pb   = d.get("personalBests", {"bestAccuracy": 0, "bestPPM": 0, "bestStars": 0})
+
+    # ── Accuracy trend (last 10 sessions for chart) ────────────
+    recent_sessions = [
+        {
+            "submitted": s.get("submitted", ""),
+            "pct":       s.get("pct", 0),
+            "ppm":       s.get("ppm"),
+            "stars":     s.get("stars"),
+            "levels":    s.get("levels", {}),
+            "ops":       s.get("ops"),
+        }
+        for s in sess[-10:]
+    ]
+
+    # ── Overall averages ───────────────────────────────────────
+    pcts = [s.get("pct", 0) for s in sess if s.get("pct") is not None]
+    avg_accuracy = round(sum(pcts) / len(pcts)) if pcts else 0
+
+    ppms = [s["ppm"] for s in sess if s.get("ppm") is not None]
+    avg_ppm = round(sum(ppms) / len(ppms), 1) if ppms else None
+
+    total_stars = sum(s.get("stars", 0) for s in sess)
+
+    # ── Trend ──────────────────────────────────────────────────
+    trend = "stable"
+    if len(pcts) >= 6:
+        recent = sum(pcts[-3:]) / 3
+        prior  = sum(pcts[-6:-3]) / 3
+        if recent > prior + 5:   trend = "improving"
+        elif recent < prior - 5: trend = "declining"
+    elif len(pcts) >= 3:
+        recent = sum(pcts[-3:]) / 3
+        prior  = pcts[0]
+        if recent > prior + 5:   trend = "improving"
+        elif recent < prior - 5: trend = "declining"
+
+    # ── Per-operation lifetime averages ────────────────────────
+    op_totals = {op: {"total": 0, "correct": 0} for op in ("add", "sub", "mul", "div")}
+    for s in sess:
+        for op, data in (s.get("ops") or {}).items():
+            if op in op_totals:
+                op_totals[op]["total"]   += data.get("total", 0)
+                op_totals[op]["correct"] += data.get("correct", 0)
+    op_avgs = {
+        op: round(v["correct"] / v["total"] * 100) if v["total"] else None
+        for op, v in op_totals.items()
+    }
+
+    # ── Practice consistency ───────────────────────────────────
+    import datetime as _dt
+    # Sessions per week (last 4 weeks)
+    sessions_per_week = None
+    dated_sessions = [s for s in sess if s.get("submitted", "")]
+    if dated_sessions:
+        try:
+            # Try to parse dates — handle multiple formats
+            def _parse(raw):
+                for fmt in ("%b %d, %Y %I:%M %p", "%b %d, %Y %I:%M%p", "%b %d, %Y"):
+                    try:
+                        return _dt.datetime.strptime(raw.strip(), fmt).date()
+                    except Exception:
+                        pass
+                return None
+            four_weeks_ago = _dt.date.today() - _dt.timedelta(weeks=4)
+            recent_count = sum(
+                1 for s in dated_sessions
+                if _parse(s.get("submitted", "")) and _parse(s.get("submitted", "")) >= four_weeks_ago
+            )
+            sessions_per_week = round(recent_count / 4, 1)
+        except Exception:
+            pass
+
+    # ── Grade-level context ────────────────────────────────────
+    # Maps operation level to approximate grade equivalency for parent messaging
+    def grade_label(level):
+        if level <= 2:  return "Early 2nd Grade"
+        if level <= 4:  return "2nd–3rd Grade"
+        if level <= 6:  return "3rd–4th Grade"
+        if level <= 8:  return "4th–5th Grade"
+        return "5th Grade+"
+
+    current_levels = {
+        "add": d.get("add", 1), "sub": d.get("sub", 1),
+        "mul": d.get("mul", 1), "div": d.get("div", 1),
+    }
+    grade_context = {op: grade_label(lvl) for op, lvl in current_levels.items()}
+
+    # ── Find student name from sessions ───────────────────────
+    student_name = ""
+    class_name   = ""
+    if sess:
+        student_name = sess[-1].get("studentName", "")
+        class_name   = sess[-1].get("className", "")
+
+    return {
+        "studentId":       student_id,
+        "studentName":     student_name,
+        "className":       class_name,
+        "generatedOn":     _dt.date.today().isoformat(),
+        "totalSessions":   len(sess),
+        "totalStars":      total_stars,
+        "avgAccuracy":     avg_accuracy,
+        "avgPPM":          avg_ppm,
+        "trend":           trend,
+        "streakDays":      d.get("streakDays", 0),
+        "lastDrillDate":   d.get("lastDrillDate", ""),
+        "sessionsPerWeek": sessions_per_week,
+        "personalBests":   pb,
+        "currentLevels":   current_levels,
+        "gradeContext":    grade_context,
+        "opAvgs":          op_avgs,
+        "recentSessions":  recent_sessions,
+    }
 
 
 if __name__ == "__main__":
