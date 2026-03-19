@@ -164,6 +164,7 @@ class Session(BaseModel):
     timeUsed:    str
     answers:     dict
     violations:  Optional[int] = 0
+    violationLog: Optional[list] = []     # [{reason, time, questionNum}]
     mode:        Optional[str] = "test"   # "test" | "drill" | "practice"
 
 class Heartbeat(BaseModel):
