@@ -275,6 +275,17 @@ def get_student_history(student_id: str):
                if s.get("studentId") == student_id or s.get("studentName") == student_id]
     return history
 
+@app.delete("/sessions/class/{cid}")
+def clear_class_sessions(cid: str):
+    """Clear test sessions (not drills) for a specific class."""
+    cls = next((c for c in roster if c["id"] == cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    keep = [s for s in sessions if not (s.get("classId") == cid and s.get("mode","test") not in ("drill","practice"))]
+    removed = len(sessions) - len(keep)
+    sessions.clear(); sessions.extend(keep)
+    _save("sessions.json", sessions)
+    return {"ok": True, "removed": removed, "className": cls["name"]}
+
 @app.delete("/sessions")
 def clear_sessions(mode: Optional[str] = None):
     """Clear all sessions or only those matching mode: 'tests' or 'drills'."""
@@ -483,7 +494,10 @@ def get_class(cid: str):
 
 @app.post("/roster/class")
 def create_class(body: NewClass):
-    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": body.name.strip(), "students": [], "gcCourseId": body.gcCourseId, "hideTimer": True}
+    name = body.name.strip()
+    if any(c["name"].strip().lower() == name.lower() for c in roster):
+        raise HTTPException(400, f"A class named \"{name}\" already exists. Use a unique name.")
+    cls = {"id": "c" + uuid.uuid4().hex[:8], "name": name, "students": [], "gcCourseId": body.gcCourseId, "hideTimer": True}
     roster.append(cls)
     _save("roster.json", roster)
     # Link to teacher if provided
@@ -508,7 +522,10 @@ def update_class(cid: str, body: UpdateClass):
     cls = next((c for c in roster if c["id"]==cid), None)
     if not cls: raise HTTPException(404, "Class not found")
     if body.name is not None:
-        cls["name"] = body.name.strip()
+        new_name = body.name.strip()
+        if any(c["name"].strip().lower() == new_name.lower() and c["id"] != cid for c in roster):
+            raise HTTPException(400, f"A class named \"{new_name}\" already exists.")
+        cls["name"] = new_name
     if body.gcCourseId is not None:
         cls["gcCourseId"] = body.gcCourseId
     if body.hideTimer is not None:
@@ -675,7 +692,9 @@ def admin_overview():
 # ── Teacher accounts ──────────────────────────────────────
 @app.get("/teachers")
 def get_teachers():
-    return [{"id":t["id"],"name":t["name"],"classIds":t.get("classIds",[]),
+    valid_class_ids = {c["id"] for c in roster}
+    return [{"id":t["id"],"name":t["name"],
+             "classIds":[cid for cid in t.get("classIds",[]) if cid in valid_class_ids],
              "email": t.get("email",""),
              "role":  t.get("role","teacher"),
              } for t in teachers]
@@ -743,12 +762,19 @@ def google_teacher_verify(body: GoogleVerifyBody):
     t = next((t for t in teachers if (t.get("email") or "").lower().strip() == email), None)
     if not t:
         raise HTTPException(403, "Your Google account is not registered as a teacher. Contact your administrator.")
+    # Filter out stale classIds that reference deleted classes
+    valid_class_ids = {c["id"] for c in roster}
+    raw_ids = t.get("classIds", [])
+    clean_ids = [cid for cid in raw_ids if cid in valid_class_ids]
+    if len(clean_ids) != len(raw_ids):
+        t["classIds"] = clean_ids
+        _save("teachers.json", teachers)
     return {
         "role":        "teacher",
         "teacherRole": t.get("role", "teacher"),
         "teacherId":   t["id"],
         "teacherName": t["name"],
-        "classIds":    t.get("classIds", []),
+        "classIds":    clean_ids,
     }
 
 
@@ -1180,19 +1206,67 @@ def get_parent_report(student_id: str):
             pass
 
     # ── Grade-level context ────────────────────────────────────
-    # Maps operation level to approximate grade equivalency for parent messaging
-    def grade_label(level):
-        if level <= 2:  return "Early 2nd Grade"
-        if level <= 4:  return "2nd–3rd Grade"
-        if level <= 6:  return "3rd–4th Grade"
-        if level <= 8:  return "4th–5th Grade"
-        return "5th Grade+"
+    # Per-operation level descriptions aligned to GA K-5 Math Standards
+    _LEVEL_DESC = {
+        "add": [
+            "Add within 5",                              # 1 - K
+            "Add within 10",                             # 2 - K
+            "Add within 20 (single digits)",             # 3 - Gr 1
+            "2-digit + 1-digit, within 100",             # 4 - Gr 1
+            "2-digit + 2-digit, within 100",             # 5 - Gr 2
+            "3-digit + 2-digit, within 1,000",           # 6 - Gr 2
+            "3-digit + 3-digit, within 1,000",           # 7 - Gr 3
+            "4-digit + 3-digit, within 10,000",          # 8 - Gr 3
+            "5-digit + 4-digit, within 100,000",         # 9 - Gr 4
+            "Add through hundred-thousands",             # 10 - Gr 4
+        ],
+        "sub": [
+            "Subtract within 5",                         # 1 - K
+            "Subtract within 10",                        # 2 - K
+            "Subtract within 20",                        # 3 - Gr 1
+            "2-digit − 1-digit, within 100",             # 4 - Gr 1
+            "2-digit − 2-digit, within 100",             # 5 - Gr 2
+            "3-digit − 2-digit, within 1,000",           # 6 - Gr 2
+            "3-digit − 3-digit, within 1,000",           # 7 - Gr 3
+            "4-digit − 3-digit, within 10,000",          # 8 - Gr 3
+            "5-digit − 4-digit, within 100,000",         # 9 - Gr 4
+            "Subtract through hundred-thousands",        # 10 - Gr 4
+        ],
+        "mul": [
+            "Equal groups / arrays to 5×5",              # 1 - Gr 2
+            "× 0 and × 1",                              # 2 - Gr 3
+            "× 2, × 5, × 10",                           # 3 - Gr 3
+            "× 3 and × 4",                              # 4 - Gr 3
+            "× 6 and × 7",                              # 5 - Gr 3
+            "× 8 and × 9 (within 100)",                  # 6 - Gr 3
+            "× multiples of 10",                         # 7 - Gr 3
+            "2-digit × 1-digit",                         # 8 - Gr 4
+            "2-digit × 2-digit",                         # 9 - Gr 4
+            "3-digit × 2-digit",                         # 10 - Gr 5
+        ],
+        "div": [
+            "÷ 1 and ÷ 2, within 100",                  # 1 - Gr 3
+            "÷ 3 and ÷ 4, within 100",                  # 2 - Gr 3
+            "÷ 5 and ÷ 6, within 100",                  # 3 - Gr 3
+            "÷ 7, ÷ 8, ÷ 9, within 100",                # 4 - Gr 3
+            "÷ multiples of 10",                         # 5 - Gr 3
+            "2-digit ÷ 1-digit",                         # 6 - Gr 4
+            "3-digit ÷ 1-digit",                         # 7 - Gr 4
+            "4-digit ÷ 1-digit",                         # 8 - Gr 4
+            "÷ 2-digit, 2–3-digit dividend",             # 9 - Gr 5
+            "÷ 2-digit, up to 4-digit",                  # 10 - Gr 5
+        ],
+    }
 
     current_levels = {
         "add": d.get("add", 1), "sub": d.get("sub", 1),
         "mul": d.get("mul", 1), "div": d.get("div", 1),
     }
-    grade_context = {op: grade_label(lvl) for op, lvl in current_levels.items()}
+    grade_context = {}
+    for op, lvl in current_levels.items():
+        descs = _LEVEL_DESC.get(op, [])
+        idx = max(0, min(lvl - 1, len(descs) - 1))
+        grade_context[op] = descs[idx] if descs else f"Level {lvl}"
 
     # ── Find student name from sessions ───────────────────────
     student_name = ""
@@ -1200,6 +1274,35 @@ def get_parent_report(student_id: str):
     if sess:
         student_name = sess[-1].get("studentName", "")
         class_name   = sess[-1].get("className", "")
+
+    # ── Days practiced this week ──────────────────────────────
+    days_this_week = 0
+    try:
+        today = _dt.date.today()
+        start_of_week = today - _dt.timedelta(days=today.weekday())  # Monday
+        week_dates = set()
+        for s in sess:
+            d_parsed = _parse(s.get("submitted", ""))
+            if d_parsed and d_parsed >= start_of_week:
+                week_dates.add(d_parsed)
+        days_this_week = len(week_dates)
+    except Exception:
+        pass
+
+    # ── Action item: weakest operation that has data ────────
+    action_item = None
+    practiced_ops = {op: v for op, v in op_avgs.items() if v is not None}
+    if practiced_ops:
+        weakest_op = min(practiced_ops, key=lambda k: practiced_ops[k])
+        if practiced_ops[weakest_op] < 85:
+            op_name = {"add": "addition", "sub": "subtraction", "mul": "multiplication", "div": "division"}[weakest_op]
+            action_item = f"Practice {op_name} facts at home — flashcards, games, or another MathReady drill session."
+    # If no weak op but missing ops, suggest starting them
+    if not action_item:
+        missing = [op for op in ("mul", "div") if op_avgs.get(op) is None]
+        if missing:
+            op_name = {"mul": "multiplication", "div": "division"}[missing[0]]
+            action_item = f"Ready to start {op_name} practice — encourage your child to keep drilling!"
 
     return {
         "studentId":       student_id,
@@ -1214,12 +1317,28 @@ def get_parent_report(student_id: str):
         "streakDays":      d.get("streakDays", 0),
         "lastDrillDate":   d.get("lastDrillDate", ""),
         "sessionsPerWeek": sessions_per_week,
+        "daysThisWeek":    days_this_week,
         "personalBests":   pb,
         "currentLevels":   current_levels,
         "gradeContext":    grade_context,
         "opAvgs":          op_avgs,
         "recentSessions":  recent_sessions,
+        "actionItem":      action_item,
     }
+
+@app.get("/fluency/report/class/{cid}")
+def get_class_parent_reports(cid: str):
+    """Batch parent reports for all students in a class with fluency data."""
+    cls = next((c for c in roster if c["id"] == cid), None)
+    if not cls: raise HTTPException(404, "Class not found")
+    reports = []
+    for st in cls.get("students", []):
+        try:
+            report = get_parent_report(st["id"])
+            reports.append(report)
+        except Exception:
+            pass
+    return {"className": cls["name"], "reports": reports}
 
 
 if __name__ == "__main__":
