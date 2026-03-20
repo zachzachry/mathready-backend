@@ -182,6 +182,7 @@ class Question(BaseModel):
     choiceImages:  Optional[List[Any]] = None
     correct:       Optional[str] = ""
     answer:        Optional[Any] = None
+    subject:       Optional[str] = "math"         # "math" | "science"
 
 class ActiveTest(BaseModel):
     questions: List[Any]
@@ -201,6 +202,7 @@ class SavedTest(BaseModel):
     warnSecs:       Optional[int] = 300          # default warn at 5 min
     oneAttempt:     Optional[bool] = False        # limit to one submission per student
     classIds:       Optional[List[str]] = []       # classes assigned to this test
+    subject:        Optional[str] = "math"         # "math" | "science"
 
 class NewClass(BaseModel):
     name: str
@@ -418,7 +420,9 @@ def get_saved_tests():
              "classIds": t.get("classIds",[]),
              "oneAttempt": t.get("oneAttempt", False),
              "untimed": t.get("untimed", False),
-             "timeLimitSecs": t.get("timeLimitSecs", 1800)} for t in saved_tests]
+             "timeLimitSecs": t.get("timeLimitSecs", 1800),
+             "adaptive": t.get("adaptive", False),
+             "subject": t.get("subject", "math")} for t in saved_tests]
 
 @app.get("/tests/saved/{tid}")
 def get_saved_test(tid: str):
@@ -455,6 +459,7 @@ def update_saved_test(tid: str, test: SavedTest):
     t["warnSecs"]      = test.warnSecs
     t["oneAttempt"]    = test.oneAttempt
     t["classIds"]      = test.classIds or []
+    t["subject"]       = test.subject or "math"
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "code": new_code}
 
