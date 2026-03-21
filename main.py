@@ -148,6 +148,7 @@ saved_tests   = _load("saved_tests.json", [])
 roster        = _load("roster.json",      [])   # list of {id, name, students:[{id,name}]}
 teachers      = _load("teachers.json",   [])   # list of {id, name, email, role, classIds:[]}
 fluency_data  = _load("fluency_data.json", {})  # {studentId: {add,sub,mul,div, sessions:[]}}
+assignments   = _load("test_assignments.json", {})  # {aid: {testId,classId,studentIds,completedIds,...}}
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
@@ -189,6 +190,13 @@ class Question(BaseModel):
 class ActiveTest(BaseModel):
     questions: List[Any]
     title:     Optional[str] = "Practice Test"
+
+class TestAssignmentBody(BaseModel):
+    testId:        str
+    classId:       str
+    studentIds:    List[str]
+    createdBy:     Optional[str] = ""
+    createdByName: Optional[str] = ""
 
 class SavedTest(BaseModel):
     name:           str
@@ -240,6 +248,16 @@ def submit_session(session: Session):
         d["pct"] = round(score / total * 100) if total else 0
     sessions.append(d)
     _save("sessions.json", sessions)
+    # Auto-complete assignment if student was assigned this test
+    sid = d.get("studentId", "")
+    code = d.get("testCode", "").upper()
+    if sid and code:
+        for aid, a in assignments.items():
+            if a.get("testCode", "").upper() == code and sid in a.get("studentIds", []):
+                if sid not in a.get("completedIds", []):
+                    a.setdefault("completedIds", []).append(sid)
+                    _save("test_assignments.json", assignments)
+                break
     return {"ok": True, "score": d["score"], "total": d["total"], "pct": d["pct"]}
 
 @app.get("/test/attempt-check")
@@ -1346,6 +1364,116 @@ def get_class_parent_reports(cid: str):
         except Exception:
             pass
     return {"className": cls["name"], "reports": reports}
+
+
+# ── Test Assignments ────────────────────────────────────────
+
+@app.post("/assignments")
+def create_assignment(body: TestAssignmentBody):
+    """Assign a saved test to specific students in a class."""
+    test = next((t for t in saved_tests if t["id"] == body.testId), None)
+    if not test:
+        raise HTTPException(404, "Saved test not found")
+    cls = next((c for c in roster if c["id"] == body.classId), None)
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    aid = "a" + uuid.uuid4().hex[:8]
+    assignments[aid] = {
+        "testId":        body.testId,
+        "testCode":      test.get("code", ""),
+        "testTitle":     test.get("name", test.get("title", "Test")),
+        "classId":       body.classId,
+        "className":     cls["name"],
+        "studentIds":    body.studentIds,
+        "completedIds":  [],
+        "createdBy":     body.createdBy,
+        "createdByName": body.createdByName,
+        "createdAt":     datetime.now().isoformat(),
+    }
+    _save("test_assignments.json", assignments)
+    return {"ok": True, "id": aid, "assignment": assignments[aid]}
+
+@app.get("/assignments")
+def list_assignments(classIds: Optional[str] = None):
+    """List assignments, optionally filtered by classIds."""
+    if classIds:
+        ids = {i.strip() for i in classIds.split(",") if i.strip()}
+        filtered = {k: v for k, v in assignments.items() if v.get("classId") in ids}
+    else:
+        filtered = assignments
+    result = []
+    for aid, a in filtered.items():
+        result.append({
+            "id": aid,
+            **a,
+            "totalStudents":  len(a.get("studentIds", [])),
+            "completedCount": len(a.get("completedIds", [])),
+        })
+    return result
+
+@app.get("/assignments/student/{student_id}")
+def get_student_assignment(student_id: str):
+    """Get active (uncompleted) assignments for a student."""
+    active = []
+    for aid, a in assignments.items():
+        if student_id in a.get("studentIds", []) and student_id not in a.get("completedIds", []):
+            test = next((t for t in saved_tests if t["id"] == a["testId"]), None)
+            if test:
+                active.append({
+                    "assignmentId": aid,
+                    "testId":       a["testId"],
+                    "testCode":     a.get("testCode", ""),
+                    "testTitle":    a.get("testTitle", "Test"),
+                    "className":    a.get("className", ""),
+                    "classId":      a.get("classId", ""),
+                    "questions":    test.get("questions", []),
+                    "adaptive":     test.get("adaptive", False),
+                    "untimed":      test.get("untimed", False),
+                    "timeLimitSecs": test.get("timeLimitSecs", 1800),
+                    "warnSecs":     test.get("warnSecs", 300),
+                    "oneAttempt":   test.get("oneAttempt", False),
+                })
+    return {"assignments": active}
+
+@app.patch("/assignments/{aid}/students")
+def update_assignment_students(aid: str, body: dict):
+    """Update which students are assigned (add/remove absent kids)."""
+    if aid not in assignments:
+        raise HTTPException(404, "Assignment not found")
+    assignments[aid]["studentIds"] = body.get("studentIds", [])
+    _save("test_assignments.json", assignments)
+    return {"ok": True}
+
+@app.patch("/assignments/{aid}/complete")
+def complete_assignment(aid: str, body: dict):
+    """Mark a student as completed."""
+    if aid not in assignments:
+        raise HTTPException(404, "Assignment not found")
+    sid = body.get("studentId", "")
+    if sid and sid not in assignments[aid].get("completedIds", []):
+        assignments[aid].setdefault("completedIds", []).append(sid)
+        _save("test_assignments.json", assignments)
+    return {"ok": True}
+
+@app.patch("/assignments/{aid}/reopen")
+def reopen_assignment(aid: str, body: dict):
+    """Re-enable a student for retake (remove from completedIds)."""
+    if aid not in assignments:
+        raise HTTPException(404, "Assignment not found")
+    sid = body.get("studentId", "")
+    if sid:
+        assignments[aid]["completedIds"] = [s for s in assignments[aid].get("completedIds", []) if s != sid]
+        _save("test_assignments.json", assignments)
+    return {"ok": True}
+
+@app.delete("/assignments/{aid}")
+def delete_assignment(aid: str):
+    """Remove a test assignment."""
+    if aid not in assignments:
+        raise HTTPException(404, "Assignment not found")
+    del assignments[aid]
+    _save("test_assignments.json", assignments)
+    return {"ok": True}
 
 
 if __name__ == "__main__":
