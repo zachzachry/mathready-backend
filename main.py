@@ -327,6 +327,16 @@ def clear_class_sessions(cid: str):
     _save("sessions.json", sessions)
     return {"ok": True, "removed": removed, "className": cls["name"]}
 
+@app.delete("/sessions/test/{code}")
+def delete_sessions_by_test(code: str):
+    """Delete all sessions for a specific test code."""
+    code_upper = code.strip().upper()
+    keep = [s for s in sessions if s.get("testCode","").upper() != code_upper]
+    removed = len(sessions) - len(keep)
+    sessions.clear(); sessions.extend(keep)
+    _save("sessions.json", sessions)
+    return {"ok": True, "removed": removed}
+
 @app.delete("/sessions")
 def clear_sessions(mode: Optional[str] = None):
     """Clear all sessions or only those matching mode: 'tests' or 'drills'."""
