@@ -180,9 +180,11 @@ class Question(BaseModel):
     type:          Optional[str] = "mcq"
     choices:       Optional[List[str]] = []
     choiceImages:  Optional[List[Any]] = None
-    correct:       Optional[str] = ""
+    correct:       Optional[Any] = ""                # str for mcq, object for dragdrop
     answer:        Optional[Any] = None
-    subject:       Optional[str] = "math"         # "math" | "science"
+    zones:         Optional[List[str]] = None      # dragdrop: category names
+    items:         Optional[List[str]] = None      # dragdrop: draggable items
+    subject:       Optional[str] = "math"          # "math" | "science"
 
 class ActiveTest(BaseModel):
     questions: List[Any]
