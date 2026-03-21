@@ -1388,7 +1388,7 @@ def create_assignment(body: TestAssignmentBody):
         "completedIds":  [],
         "createdBy":     body.createdBy,
         "createdByName": body.createdByName,
-        "createdAt":     datetime.now().isoformat(),
+        "createdAt":     __import__("datetime").datetime.now().isoformat(),
     }
     _save("test_assignments.json", assignments)
     return {"ok": True, "id": aid, "assignment": assignments[aid]}
