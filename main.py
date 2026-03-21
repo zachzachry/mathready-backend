@@ -183,8 +183,9 @@ class Question(BaseModel):
     choiceImages:  Optional[List[Any]] = None
     correct:       Optional[Any] = ""                # str for mcq, object for dragdrop
     answer:        Optional[Any] = None
-    zones:         Optional[List[str]] = None      # dragdrop: category names
-    items:         Optional[List[str]] = None      # dragdrop: draggable items
+    zones:         Optional[List[str]] = None      # dragdrop: category names / blank labels
+    items:         Optional[List[str]] = None      # dragdrop: draggable items / answer tiles
+    ddLayout:      Optional[str] = "categories"    # "categories" | "blanks"
     subject:       Optional[str] = "math"          # "math" | "science"
 
 class ActiveTest(BaseModel):
