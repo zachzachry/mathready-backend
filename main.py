@@ -89,6 +89,24 @@ def _grade_answer(q, given):
             return False
     if qtype == "keypad":
         return str(correct_val).strip().lower() == str(given).strip().lower()
+    if qtype == "dragdrop":
+        try:
+            g = json.loads(given) if isinstance(given, str) else given
+            correct_map = q.get("correct") or q.get("answer") or {}
+            if not isinstance(correct_map, dict):
+                return False
+            items = q.get("items") or []
+            for item in items:
+                c = correct_map.get(item)
+                if c == "distractor":
+                    if g.get(item) is not None:
+                        return False
+                else:
+                    if g.get(item) != c:
+                        return False
+            return True
+        except Exception:
+            return False
     # Default: MCQ — exact string match
     return str(given).strip() == str(correct_val).strip()
 
