@@ -500,7 +500,7 @@ def update_saved_test(tid: str, test: SavedTest):
     t["classIds"]      = test.classIds or []
     t["subject"]       = test.subject or "math"
     if test.questions:
-        t["questions"] = [q.dict() for q in test.questions]
+        t["questions"] = [q if isinstance(q, dict) else q.dict() for q in test.questions]
         t["count"]     = len(test.questions)
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "code": new_code}
