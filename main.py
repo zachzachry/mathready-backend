@@ -107,6 +107,29 @@ def _grade_answer(q, given):
             return True
         except Exception:
             return False
+    if qtype == "hotspot":
+        try:
+            import math
+            g = json.loads(given) if isinstance(given, str) else given
+            correct_map = q.get("answer") or {}
+            asset_type = q.get("assetType", "tile")
+            is_dot = asset_type in ("dot", "pin")
+            snap_points = q.get("snapPoints") or []
+            correct_sps = [sp for sp in snap_points if correct_map.get(sp["id"])]
+            TOL = 2.5  # % tolerance
+            # All placements now use [{x, y, val}, ...] format
+            if not isinstance(g, list) or len(g) != len(correct_sps):
+                return False
+            matched = 0
+            for sp in correct_sps:
+                for pt in g:
+                    d = math.sqrt((sp["x"] - pt.get("x", 0))**2 + (sp["y"] - pt.get("y", 0))**2)
+                    if d <= TOL and (is_dot or pt.get("val") == correct_map[sp["id"]]):
+                        matched += 1
+                        break
+            return matched == len(correct_sps)
+        except Exception:
+            return False
     # Default: MCQ — exact string match
     return str(given).strip() == str(correct_val).strip()
 
@@ -185,6 +208,7 @@ class Session(BaseModel):
     violations:  Optional[int] = 0
     violationLog: Optional[list] = []     # [{reason, time, questionNum}]
     mode:        Optional[str] = "test"   # "test" | "drill" | "practice"
+    questionTimes: Optional[list] = []   # [{qId, standard, dok, timeSecs, correct}]
 
 class Heartbeat(BaseModel):
     name: str; current: int
@@ -192,7 +216,7 @@ class Heartbeat(BaseModel):
 class Question(BaseModel):
     id:            Optional[str] = None
     standard:      str
-    short:         str
+    short:         Optional[str] = ""
     dok:           Optional[int] = None
     question:      str
     questionImage: Optional[str] = None
@@ -204,6 +228,10 @@ class Question(BaseModel):
     zones:         Optional[List[str]] = None      # dragdrop: category names / blank labels
     items:         Optional[List[str]] = None      # dragdrop: draggable items / answer tiles
     ddLayout:      Optional[str] = "categories"    # "categories" | "blanks"
+    snapPoints:    Optional[list] = None           # hotspot: [{id, x, y, w?, h?, label?}]
+    assetType:     Optional[str] = None            # hotspot: "dot"|"pin"|"tile"|"custom"
+    assetReuse:    Optional[bool] = None           # hotspot: true = tiles stay in tray
+    assetSize:     Optional[str] = None            # hotspot: "xs"|"sm"|"md"|"lg"|"xl"
     subject:       Optional[str] = "math"          # "math" | "science"
 
 class ActiveTest(BaseModel):
@@ -218,20 +246,27 @@ class TestAssignmentBody(BaseModel):
     createdByName: Optional[str] = ""
 
 class SavedTest(BaseModel):
-    name:           str
-    code:           Optional[str] = None
-    questions:      List[Any]
-    title:          Optional[str] = ""
-    adaptive:       Optional[bool] = False
-    type:           Optional[str] = "test"       # "test" | "drill"
-    drillStandards: Optional[List[str]] = []
-    drillCount:     Optional[int] = 10
-    untimed:        Optional[bool] = False
-    timeLimitSecs:  Optional[int] = 1800         # default 30 min
-    warnSecs:       Optional[int] = 300          # default warn at 5 min
-    oneAttempt:     Optional[bool] = False        # limit to one submission per student
-    classIds:       Optional[List[str]] = []       # classes assigned to this test
-    subject:        Optional[str] = "math"         # "math" | "science"
+    name:            str
+    code:            Optional[str] = None
+    questions:       List[Any]
+    title:           Optional[str] = ""
+    adaptive:        Optional[bool] = False
+    type:            Optional[str] = "test"       # "test" | "drill"
+    drillStandards:  Optional[List[str]] = []
+    drillCount:      Optional[int] = 10
+    untimed:         Optional[bool] = False
+    timeLimitSecs:   Optional[int] = 1800
+    warnSecs:        Optional[int] = 300
+    oneAttempt:      Optional[bool] = False
+    classIds:        Optional[List[str]] = []
+    subject:         Optional[str] = "math"
+    # Ownership & visibility
+    createdBy:       Optional[str] = ""           # teacher ID; "" = legacy (visible to all)
+    createdByName:   Optional[str] = ""
+    visibility:      Optional[str] = "private"    # "private" | "grade" | "global"
+    sharedWith:      Optional[List[str]] = []     # teacher IDs (grade visibility)
+    adminScoresOnly: Optional[bool] = False       # GMAS sim — strip from teacher dashboards
+    closeDate:       Optional[str] = None         # ISO date; students blocked after this
 
 class NewClass(BaseModel):
     name: str
@@ -299,15 +334,22 @@ def check_attempt(code: str, studentId: str = "", studentName: str = ""):
     return {"attempted": already}
 
 @app.get("/sessions")
-def get_sessions(classIds: Optional[str] = None):
+def get_sessions(classIds: Optional[str] = None, role: Optional[str] = None):
+    is_admin = role in ("super_admin", "school_admin")
     if classIds is None:
-        return sessions  # Admin: no filter
-    if classIds.strip() == "":
-        return []  # Teacher with no classes: empty, not all
-    ids = {i for i in classIds.split(",") if i.strip()}
-    if not ids:
+        result = list(sessions)  # Admin: no filter
+    elif classIds.strip() == "":
         return []
-    return [s for s in sessions if s.get("classId") in ids]
+    else:
+        ids = {i for i in classIds.split(",") if i.strip()}
+        if not ids:
+            return []
+        result = [s for s in sessions if s.get("classId") in ids]
+    # Strip GMAS/adminScoresOnly sessions from non-admin teachers
+    if not is_admin:
+        admin_codes = {t.get("code","").upper() for t in saved_tests if t.get("adminScoresOnly")}
+        result = [s for s in result if s.get("testCode","").upper() not in admin_codes]
+    return result
 
 @app.get("/student/history/{student_id}")
 def get_student_history(student_id: str):
@@ -459,28 +501,48 @@ def get_test_by_code(code: str):
 
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
-def get_saved_tests():
-    return [{"id": t["id"], "name": t["name"], "code": t.get("code",""),
-             "title": t.get("title",""), "count": len(t.get("questions",[])),
-             "saved_at": t.get("saved_at",""),
-             "type": t.get("type","test"),
-             "drill_count": t.get("drillCount", 10),
-             "drill_standards": t.get("drillStandards",[]),
-             "classIds": t.get("classIds",[]),
-             "oneAttempt": t.get("oneAttempt", False),
-             "untimed": t.get("untimed", False),
-             "timeLimitSecs": t.get("timeLimitSecs", 1800),
-             "adaptive": t.get("adaptive", False),
-             "subject": t.get("subject", "math")} for t in saved_tests]
+def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None):
+    is_admin = role in ("super_admin", "school_admin")
+    def visible(t):
+        cb = t.get("createdBy", "")
+        vis = t.get("visibility", "private")
+        if is_admin: return True
+        if not cb: return True                                   # legacy unowned — everyone sees
+        if cb == teacherId: return True                          # your own test
+        if vis == "grade" and teacherId in t.get("sharedWith",[]): return True
+        if vis == "global": return True
+        return False
+    tests = [t for t in saved_tests if not teacherId or visible(t)]
+    def row(t):
+        is_global = t.get("visibility") == "global"
+        return {
+            "id": t["id"], "name": t.get("name",""), "code": t.get("code",""),
+            "title": t.get("title",""), "count": len(t.get("questions",[])),
+            "saved_at": t.get("saved_at",""), "type": t.get("type","test"),
+            "drill_count": t.get("drillCount",10), "drill_standards": t.get("drillStandards",[]),
+            "classIds": t.get("classIds",[]), "oneAttempt": t.get("oneAttempt",False),
+            "untimed": t.get("untimed",False), "timeLimitSecs": t.get("timeLimitSecs",1800),
+            "adaptive": t.get("adaptive",False), "subject": t.get("subject","math"),
+            "createdBy": t.get("createdBy",""), "createdByName": t.get("createdByName",""),
+            "visibility": t.get("visibility","private"), "sharedWith": t.get("sharedWith",[]),
+            "adminScoresOnly": t.get("adminScoresOnly",False), "closeDate": t.get("closeDate"),
+        }
+    return [row(t) for t in tests]
 
 @app.get("/tests/saved/{tid}")
-def get_saved_test(tid: str):
+def get_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None):
     t = next((t for t in saved_tests if t["id"]==tid), None)
     if not t: raise HTTPException(404, "Not found")
+    is_admin = role in ("super_admin", "school_admin")
+    # Block question content for global tests if not admin
+    if not is_admin and t.get("visibility") == "global":
+        result = {k: v for k, v in t.items() if k != "questions"}
+        result["questions"] = []
+        return result
     return t
 
 @app.post("/tests/saved")
-def save_test(test: SavedTest):
+def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None):
     data = test.dict()
     data["id"]       = "t" + uuid.uuid4().hex[:8]
     data["saved_at"] = time.strftime("%b %d, %Y %I:%M %p")
@@ -488,17 +550,31 @@ def save_test(test: SavedTest):
     else: data["code"] = data["code"].strip().upper()
     existing = {t.get("code","") for t in saved_tests}
     while data["code"] in existing: data["code"] = gen_code()
+    # Store ownership — prefer body fields, fall back to query params
+    if not data.get("createdBy") and teacherId:
+        data["createdBy"] = teacherId
+    if not data.get("createdByName") and teacherId:
+        t_rec = next((t for t in teachers if t["id"] == teacherId), None)
+        if t_rec: data["createdByName"] = t_rec.get("name", "")
+    # Non-admins cannot create global tests
+    is_admin = role in ("super_admin", "school_admin")
+    if not is_admin and data.get("visibility") == "global":
+        data["visibility"] = "private"
     saved_tests.append(data)
     _save("saved_tests.json", saved_tests)
     return {"ok": True, "id": data["id"], "code": data["code"]}
 
 @app.put("/tests/saved/{tid}")
-def update_saved_test(tid: str, test: SavedTest):
+def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None):
     t = next((t for t in saved_tests if t["id"]==tid), None)
     if not t: raise HTTPException(404, "Not found")
     new_code = test.code.strip().upper() if test.code else t.get("code","")
     if new_code in {x.get("code","") for x in saved_tests if x["id"] != tid}:
         raise HTTPException(400, "Code already in use")
+    is_admin = role in ("super_admin", "school_admin")
+    cb = t.get("createdBy", "")
+    if cb and cb != teacherId and not is_admin:
+        raise HTTPException(403, "Not authorized to edit this test")
     t["name"]          = test.name
     t["code"]          = new_code
     t["title"]         = test.title or ""
@@ -509,6 +585,10 @@ def update_saved_test(tid: str, test: SavedTest):
     t["oneAttempt"]    = test.oneAttempt
     t["classIds"]      = test.classIds or []
     t["subject"]       = test.subject or "math"
+    t["visibility"]    = test.visibility or t.get("visibility", "private")
+    t["sharedWith"]    = test.sharedWith or []
+    t["adminScoresOnly"] = test.adminScoresOnly or False
+    if test.closeDate is not None: t["closeDate"] = test.closeDate
     if test.questions:
         t["questions"] = [q if isinstance(q, dict) else q.dict() for q in test.questions]
         t["count"]     = len(test.questions)
@@ -524,8 +604,14 @@ def set_test_classes(tid: str, body: dict):
     return {"ok": True}
 
 @app.delete("/tests/saved/{tid}")
-def delete_saved_test(tid: str):
+def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None):
     global saved_tests
+    t = next((t for t in saved_tests if t["id"] == tid), None)
+    if not t: raise HTTPException(404, "Not found")
+    is_admin = role in ("super_admin", "school_admin")
+    cb = t.get("createdBy", "")
+    if cb and cb != teacherId and not is_admin:
+        raise HTTPException(403, "Not authorized to delete this test")
     before = len(saved_tests)
     saved_tests = [t for t in saved_tests if t["id"] != tid]
     _save("saved_tests.json", saved_tests)
@@ -1174,6 +1260,212 @@ def reset_fluency_all():
     fluency_data.clear()
     _save("fluency_data.json", fluency_data)
     return {"ok": True, "message": f"All fluency data cleared ({count} students)"}
+
+
+# ── Student Diagnostic ───────────────────────────────────────
+
+@app.get("/sessions/student/{student_id}/diagnosis")
+def get_student_diagnosis(student_id: str):
+    """
+    Diagnose why a student is struggling: skill gap vs engagement defect.
+    Returns signals, per-standard mastery, and a structured diagnosis.
+    """
+    import statistics
+
+    # All test sessions for this student (exclude drills/practice)
+    student_sessions = [
+        s for s in sessions
+        if s.get("studentId") == student_id and s.get("mode", "test") == "test"
+    ]
+
+    if not student_sessions:
+        return {
+            "studentId": student_id,
+            "sessionCount": 0,
+            "diagnosis": "no_data",
+            "label": "No Data",
+            "skillSignals": {},
+            "engagementSignals": {},
+            "standardMastery": {},
+            "weakestStandards": [],
+            "recommendedAction": "No test sessions found for this student.",
+        }
+
+    # ── Standard mastery ─────────────────────────────────────
+    std_map = {}  # {standard: {attempts, correct}}
+    dok_map = {}  # {dok: {attempts, correct}}
+
+    for sess in student_sessions:
+        for qt in (sess.get("questionTimes") or []):
+            std = qt.get("standard", "")
+            dok = qt.get("dok")
+            correct = qt.get("correct", False)
+            if std:
+                if std not in std_map:
+                    std_map[std] = {"attempts": 0, "correct": 0}
+                std_map[std]["attempts"] += 1
+                if correct:
+                    std_map[std]["correct"] += 1
+            if dok:
+                k = str(dok)
+                if k not in dok_map:
+                    dok_map[k] = {"attempts": 0, "correct": 0}
+                dok_map[k]["attempts"] += 1
+                if correct:
+                    dok_map[k]["correct"] += 1
+
+    standard_mastery = {
+        std: {
+            "attempts": v["attempts"],
+            "correct":  v["correct"],
+            "pct":      round(v["correct"] / v["attempts"] * 100) if v["attempts"] else 0,
+        }
+        for std, v in std_map.items()
+    }
+
+    dok_mastery = {
+        k: round(v["correct"] / v["attempts"] * 100) if v["attempts"] else 0
+        for k, v in dok_map.items()
+    }
+
+    # Weakest standards (min 2 attempts, sorted by pct asc)
+    weakest = sorted(
+        [(std, d) for std, d in standard_mastery.items() if d["attempts"] >= 2],
+        key=lambda x: x[1]["pct"]
+    )[:5]
+
+    # ── Skill signals ────────────────────────────────────────
+    scores = [s.get("pct", 0) for s in student_sessions]
+    avg_test_score = round(sum(scores) / len(scores)) if scores else 0
+    score_variance = round(statistics.stdev(scores)) if len(scores) >= 2 else 0
+
+    # Clustered failure = top 3 weakest standards account for most failures
+    total_wrong = sum(v["attempts"] - v["correct"] for v in standard_mastery.values())
+    top3_wrong  = sum((d["attempts"] - d["correct"]) for _, d in weakest[:3]) if weakest else 0
+    clustered_pct = round(top3_wrong / total_wrong * 100) if total_wrong > 0 else 0
+
+    # DOK regression: score drops sharply at higher DOK = skill issue
+    dok1_pct = dok_mastery.get("1", None)
+    dok3_pct = dok_mastery.get("3", None)
+    dok_drop = (dok1_pct - dok3_pct) if (dok1_pct is not None and dok3_pct is not None) else None
+
+    # ── Engagement signals ───────────────────────────────────
+    all_times = []
+    total_violations = 0
+    total_skipped = 0
+    total_questions = 0
+
+    for sess in student_sessions:
+        total_violations += sess.get("violations", 0) or 0
+        qt_list = sess.get("questionTimes") or []
+        for qt in qt_list:
+            total_questions += 1
+            t = qt.get("timeSecs", 0) or 0
+            all_times.append(t)
+            if t == 0 and not qt.get("correct"):
+                total_skipped += 1
+
+    avg_time_per_q  = round(sum(all_times) / len(all_times), 1) if all_times else None
+    fast_pct        = round(sum(1 for t in all_times if t < 5) / len(all_times) * 100) if all_times else 0
+    skip_pct        = round(total_skipped / total_questions * 100) if total_questions else 0
+
+    # Fluency vs test gap
+    fluency_d = fluency_data.get(student_id, {})
+    fluency_sessions = fluency_d.get("sessions", [])
+    fluency_pcts = [s.get("pct", 0) for s in fluency_sessions[-10:] if s.get("pct") is not None]
+    avg_fluency = round(sum(fluency_pcts) / len(fluency_pcts)) if fluency_pcts else None
+    fluency_gap = (avg_fluency - avg_test_score) if avg_fluency is not None else None
+
+    # ── Diagnosis logic ──────────────────────────────────────
+    skill_score      = 0  # higher = more likely skill gap
+    engagement_score = 0  # higher = more likely engagement issue
+
+    if avg_test_score < 60:   skill_score += 2
+    elif avg_test_score < 75: skill_score += 1
+
+    if clustered_pct >= 60:   skill_score += 2   # failures cluster on specific standards
+    if dok_drop is not None and dok_drop > 25: skill_score += 1  # tanks on higher-order
+
+    if avg_time_per_q is not None and avg_time_per_q < 10: engagement_score += 2  # rushing
+    if fast_pct > 30:          engagement_score += 2   # >30% of answers in <5s
+    if total_violations > 3:   engagement_score += 1
+    if skip_pct > 20:          engagement_score += 1
+    if fluency_gap is not None and fluency_gap > 20: engagement_score += 2  # knows facts, fails tests
+
+    if avg_test_score >= 80:
+        diagnosis = "on_track"
+        label     = "On Track"
+    elif engagement_score >= 4 and skill_score <= 1:
+        diagnosis = "engagement"
+        label     = "Engagement Concern"
+    elif skill_score >= 3 and engagement_score <= 1:
+        diagnosis = "skill_gap"
+        label     = "Skill Gap"
+    elif skill_score >= 2 or engagement_score >= 2:
+        diagnosis = "mixed"
+        label     = "Mixed — Skill & Engagement"
+    else:
+        diagnosis = "watch"
+        label     = "Monitor"
+
+    # Recommended action
+    if diagnosis == "on_track":
+        action = "Student is performing well. Continue current approach."
+    elif diagnosis == "engagement":
+        action = "Student shows capability (good fluency scores) but is rushing or disengaged during tests. Consider a conversation about effort and test strategy."
+    elif diagnosis == "skill_gap":
+        top_stds = ", ".join(std for std, _ in weakest[:3]) if weakest else "unknown standards"
+        action = f"Student has genuine skill gaps, particularly in: {top_stds}. Reteach these standards with targeted practice."
+    elif diagnosis == "mixed":
+        action = "Student has both skill gaps and engagement issues. Address both: targeted reteaching for weak standards AND a conversation about effort."
+    else:
+        action = "Insufficient data to make a strong diagnosis. Continue monitoring."
+
+    return {
+        "studentId":      student_id,
+        "sessionCount":   len(student_sessions),
+        "avgTestScore":   avg_test_score,
+        "scoreVariance":  score_variance,
+        "diagnosis":      diagnosis,
+        "label":          label,
+        "skillScore":     skill_score,
+        "engagementScore": engagement_score,
+        "skillSignals": {
+            "clusteredFailurePct": clustered_pct,
+            "dokMastery":          dok_mastery,
+            "dokDrop":             dok_drop,
+            "avgTestScore":        avg_test_score,
+        },
+        "engagementSignals": {
+            "avgTimePerQuestion": avg_time_per_q,
+            "fastAnswerPct":      fast_pct,
+            "totalViolations":    total_violations,
+            "skipPct":            skip_pct,
+            "avgFluencyScore":    avg_fluency,
+            "fluencyTestGap":     fluency_gap,
+        },
+        "standardMastery":   standard_mastery,
+        "dokMastery":        dok_mastery,
+        "weakestStandards":  [{"standard": std, **d} for std, d in weakest],
+        "sessions":          [
+            {
+                "submitted":  s.get("submitted", ""),
+                "testTitle":  s.get("testTitle", s.get("testCode", "")),
+                "testCode":   s.get("testCode", ""),
+                "pct":        s.get("pct", 0),
+                "score":      s.get("score", 0),
+                "total":      s.get("total", 0),
+                "timeUsed":   s.get("timeUsed", ""),
+                "violations": s.get("violations", 0),
+            }
+            for s in sorted(student_sessions, key=lambda x: x.get("submitted",""))
+        ],
+        "fluencyLevels": {
+            "add": fluency_d.get("add", 1), "sub": fluency_d.get("sub", 1),
+            "mul": fluency_d.get("mul", 1), "div": fluency_d.get("div", 1),
+        },
+        "recommendedAction": action,
+    }
 
 
 # ── Parent Report ───────────────────────────────────────────

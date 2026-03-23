@@ -1,0 +1,39 @@
+{
+  "test_student_123": {
+    "balance": 0.14,
+    "owned": [
+      "hair_basic",
+      "shirt_white",
+      "pants_blue",
+      "acc_none"
+    ],
+    "equipped": {
+      "skinTone": "s3",
+      "hairColor": "hc1",
+      "hairStyle": "hair_curly",
+      "shirt": "shirt_blue",
+      "pants": "pants_black",
+      "acc": "acc_none"
+    }
+  },
+  "sfbe7cd56": {
+    "balance": 1.83,
+    "owned": [
+      "hair_basic",
+      "shirt_white",
+      "pants_blue",
+      "acc_none",
+      "hair_bun",
+      "pants_black"
+    ],
+    "equipped": {
+      "skinTone": "s5",
+      "hairColor": "hc3",
+      "hairStyle": "hair_bun",
+      "shirt": "shirt_white",
+      "pants": "pants_black",
+      "acc": "acc_none",
+      "gracieTheme": "gracie_forest"
+    }
+  }
+}
