@@ -659,6 +659,7 @@ class UpdateClass(BaseModel):
     students: Optional[List[Any]] = None  # full student objects with accommodations
     gcCourseId: Optional[str] = None
     hideTimer: Optional[bool] = None
+    drillDuration: Optional[int] = None   # fluency drill seconds: 60, 180, 300
 
 @app.put("/roster/class/{cid}")
 def update_class(cid: str, body: UpdateClass):
@@ -673,6 +674,8 @@ def update_class(cid: str, body: UpdateClass):
         cls["gcCourseId"] = body.gcCourseId
     if body.hideTimer is not None:
         cls["hideTimer"] = body.hideTimer
+    if body.drillDuration is not None:
+        cls["drillDuration"] = body.drillDuration
     if body.students is not None:
         # Merge accommodations into existing student records
         existing = {s["id"]: s for s in cls["students"]}
@@ -993,7 +996,7 @@ def google_drill_auth(body: GoogleVerifyBody):
 
     student, cls = _match_student(info, roster)
     if student:
-        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"], "hideTimer": cls.get("hideTimer", True)}}
+        return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"], "hideTimer": cls.get("hideTimer", True), "drillDuration": cls.get("drillDuration", 180)}}
 
     # Allow teachers (especially super_admin) to drill without being on a roster
     email = (info.get("email") or "").lower().strip()
@@ -1019,6 +1022,7 @@ class FluencySession(BaseModel):
     log:         List[Any]  # [{op,level,display,answer,studentAnswer,correct}]
     submitted:   Optional[str] = ""
     stars:       Optional[int] = 0  # 1-5 stars from frontend accuracy thresholds
+    drillDuration: Optional[int] = 180  # seconds — used for PPM calculation
 
 @app.get("/fluency/progress/{student_id}")
 def get_fluency_progress(student_id: str):
@@ -1085,7 +1089,8 @@ def save_fluency_session(session: FluencySession):
     if "sessions" not in fluency_data[sid]:
         fluency_data[sid]["sessions"] = []
     pct = round(correct / total * 100) if total else 0
-    ppm = round(total / 3, 1)  # 3-minute drill
+    drill_mins = max(1, (session.drillDuration or 180)) / 60
+    ppm = round(total / drill_mins, 1)
     stars = max(1, min(5, int(session.stars or 0))) if session.stars else (
         5 if pct >= 90 else 4 if pct >= 75 else 3 if pct >= 60 else 2 if pct >= 40 else 1
     )
