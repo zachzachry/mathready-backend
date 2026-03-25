@@ -379,6 +379,71 @@ def delete_sessions_by_test(code: str):
     _save("sessions.json", sessions)
     return {"ok": True, "removed": removed}
 
+@app.get("/test/review/{code}")
+def get_test_review(code: str, classId: Optional[str] = None):
+    """Teacher review: per-question stats with answer distribution, sorted by most missed."""
+    code_upper = code.strip().upper()
+    test = next((t for t in saved_tests if t.get("code", "").upper() == code_upper), None)
+    if not test:
+        raise HTTPException(404, "Test not found")
+    questions = test.get("questions", [])
+    # Filter sessions for this test (and optionally class)
+    test_sessions = [s for s in sessions
+                     if s.get("testCode", "").upper() == code_upper
+                     and s.get("mode", "test") in ("test", "")]
+    if classId:
+        test_sessions = [s for s in test_sessions if s.get("classId") == classId]
+
+    review_items = []
+    for q in questions:
+        qid = q.get("id", "")
+        qtype = q.get("type", "mcq")
+        correct_val = q.get("answer") or q.get("correct")
+        # Collect all student answers for this question
+        student_answers = []
+        correct_count = 0
+        answer_dist = {}  # answer_value -> count
+        for s in test_sessions:
+            ans = s.get("answers", {}).get(qid)
+            is_correct = _grade_answer(q, ans)
+            if is_correct:
+                correct_count += 1
+            student_answers.append({
+                "studentName": s.get("studentName", ""),
+                "studentId": s.get("studentId", ""),
+                "answer": ans,
+                "correct": is_correct,
+            })
+            # Build distribution for MCQ
+            if qtype == "mcq" and ans:
+                answer_dist[str(ans)] = answer_dist.get(str(ans), 0) + 1
+        attempted = len(student_answers)
+        pct = round(correct_count / attempted * 100) if attempted else 0
+        review_items.append({
+            "id": qid,
+            "question": q.get("question", ""),
+            "questionImage": q.get("questionImage"),
+            "type": qtype,
+            "standard": q.get("standard", ""),
+            "short": q.get("short", ""),
+            "dok": q.get("dok"),
+            "choices": q.get("choices", []),
+            "correct": str(correct_val) if correct_val is not None else "",
+            "attempted": attempted,
+            "correctCount": correct_count,
+            "pct": pct,
+            "answerDistribution": answer_dist,
+            "studentAnswers": student_answers,
+        })
+    # Sort by pct ascending (most missed first)
+    review_items.sort(key=lambda x: x["pct"])
+    return {
+        "testTitle": test.get("title", ""),
+        "testCode": code_upper,
+        "totalStudents": len(test_sessions),
+        "items": review_items,
+    }
+
 @app.delete("/sessions")
 def clear_sessions(mode: Optional[str] = None):
     """Clear all sessions or only those matching mode: 'tests' or 'drills'."""
