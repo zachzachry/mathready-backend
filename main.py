@@ -1275,7 +1275,8 @@ def get_fluency_class_report(cid: str):
 
 @app.get("/fluency/class/{cid}/leaderboard")
 def get_fluency_leaderboard(cid: str):
-    """Return Top 5 students by best accuracy for a class."""
+    """Return Top 5 students ranked by composite score (avg_level × best_accuracy).
+    This ensures a student at level 7 with 85% outranks a level 1 student with 100%."""
     cls = next((c for c in roster if c["id"] == cid), None)
     if not cls:
         raise HTTPException(404, "Class not found")
@@ -1288,13 +1289,20 @@ def get_fluency_leaderboard(cid: str):
         best_ppm = pb.get("bestPPM", 0)
         sess_count = len(d.get("sessions", []))
         if sess_count > 0:
+            # Average level across all four operations (1–10 each)
+            levels = [d.get(op, 1) for op in ("add", "sub", "mul", "div")]
+            avg_level = round(sum(levels) / len(levels), 2)
+            # Composite: level × accuracy — rewards advancement over raw accuracy
+            composite = round(avg_level * best_acc, 1)
             entries.append({
-                "studentName": student["name"],
+                "studentName":  student["name"],
                 "bestAccuracy": best_acc,
-                "bestPPM": best_ppm,
+                "bestPPM":      best_ppm,
                 "sessionCount": sess_count,
+                "avgLevel":     avg_level,
+                "composite":    composite,
             })
-    entries.sort(key=lambda x: x["bestAccuracy"], reverse=True)
+    entries.sort(key=lambda x: x["composite"], reverse=True)
     return entries[:5]
 
 
