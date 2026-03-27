@@ -1614,6 +1614,13 @@ def get_parent_report(student_id: str):
                         return _dt.datetime.strptime(raw.strip(), fmt).date()
                     except Exception:
                         pass
+                # Safety net: time-only string (e.g. "05:12 AM") — assume today
+                for fmt in ("%I:%M %p", "%I:%M%p"):
+                    try:
+                        _dt.datetime.strptime(raw.strip(), fmt)
+                        return _dt.date.today()
+                    except Exception:
+                        pass
                 return None
             four_weeks_ago = _dt.date.today() - _dt.timedelta(weeks=4)
             recent_count = sum(
