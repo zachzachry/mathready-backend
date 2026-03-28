@@ -94,6 +94,19 @@ def _next_question_id():
         return f"Q{random.randint(1,99999):05d}"
 
 
+def _parse_jsonb(val, default):
+    """Return val as a Python object. If it came back from Supabase as a
+    JSON string (double-encoded during migration), parse it first."""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return default
+    return val
+
+
 def _strip_answers(questions):
     stripped = []
     for q in questions:
@@ -175,14 +188,14 @@ def _db_question_to_api(row: dict) -> dict:
         "questionImage": row.get("question_image"),
         "type":          row.get("type", "mcq"),
         "subject":       row.get("subject", "math"),
-        "choices":       row.get("choices") or [],
-        "choiceImages":  row.get("choice_images"),
-        "correct":       row.get("correct"),
-        "answer":        row.get("answer"),
-        "zones":         row.get("zones"),
-        "items":         row.get("items"),
+        "choices":       _parse_jsonb(row.get("choices"), []),
+        "choiceImages":  _parse_jsonb(row.get("choice_images"), None),
+        "correct":       _parse_jsonb(row.get("correct"), None) if isinstance(row.get("correct"), str) and row.get("correct","").startswith("[") else row.get("correct"),
+        "answer":        _parse_jsonb(row.get("answer"), None) if isinstance(row.get("answer"), str) and row.get("answer","").startswith("[") else row.get("answer"),
+        "zones":         _parse_jsonb(row.get("zones"), None),
+        "items":         _parse_jsonb(row.get("items"), None),
         "ddLayout":      row.get("dd_layout", "categories"),
-        "snapPoints":    row.get("snap_points"),
+        "snapPoints":    _parse_jsonb(row.get("snap_points"), None),
         "assetType":     row.get("asset_type"),
         "assetReuse":    row.get("asset_reuse"),
         "assetSize":     row.get("asset_size"),
@@ -284,9 +297,9 @@ def _db_session_to_api(row: dict) -> dict:
         "timeUsed":     row.get("time_used", ""),
         "violations":   row.get("violations", 0),
         "mode":         row.get("mode", "test"),
-        "answers":      row.get("answers") or {},
-        "violationLog": row.get("violation_log") or [],
-        "questionTimes":row.get("question_times") or [],
+        "answers":      _parse_jsonb(row.get("answers"), {}),
+        "violationLog": _parse_jsonb(row.get("violation_log"), []),
+        "questionTimes":_parse_jsonb(row.get("question_times"), []),
     }
 
 
