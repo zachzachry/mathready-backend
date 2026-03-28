@@ -95,15 +95,26 @@ def _next_question_id():
 
 
 def _parse_jsonb(val, default):
-    """Return val as a Python object. If it came back from Supabase as a
-    JSON string (double-encoded during migration), parse it first."""
+    """Return val as a Python object.
+    Handles double-encoded JSONB values that Supabase returns as strings:
+      '"400"'      -> '400'        (JSON-encoded string)
+      '["a","b"]'  -> ['a','b']    (JSON-encoded array)
+      '{"k":"v"}'  -> {'k':'v'}    (JSON-encoded object)
+    Plain strings not starting with " [ { are returned as-is.
+    None returns default.
+    Already-parsed dicts/lists are returned as-is.
+    """
     if val is None:
         return default
+    if isinstance(val, (list, dict)):
+        return val
     if isinstance(val, str):
-        try:
-            return json.loads(val)
-        except Exception:
-            return default
+        s = val.strip()
+        if s and s[0] in ('"', '[', '{'):
+            try:
+                return json.loads(s)
+            except Exception:
+                pass
     return val
 
 
@@ -190,8 +201,8 @@ def _db_question_to_api(row: dict) -> dict:
         "subject":       row.get("subject", "math"),
         "choices":       _parse_jsonb(row.get("choices"), []),
         "choiceImages":  _parse_jsonb(row.get("choice_images"), None),
-        "correct":       _parse_jsonb(row.get("correct"), None) if isinstance(row.get("correct"), str) and row.get("correct","").startswith("[") else row.get("correct"),
-        "answer":        _parse_jsonb(row.get("answer"), None) if isinstance(row.get("answer"), str) and row.get("answer","").startswith("[") else row.get("answer"),
+        "correct":       _parse_jsonb(row.get("correct"), None),
+        "answer":        _parse_jsonb(row.get("answer"), None),
         "zones":         _parse_jsonb(row.get("zones"), None),
         "items":         _parse_jsonb(row.get("items"), None),
         "ddLayout":      row.get("dd_layout", "categories"),
