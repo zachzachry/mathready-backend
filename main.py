@@ -1913,12 +1913,23 @@ def get_fluency_class_report(cid: str):
         stu_res = sb.table("students").select("*").eq("class_id", cid).execute()
         students = stu_res.data or []
 
+        if not students:
+            return []
+
+        # Batch-fetch progress and sessions for all students in 2 queries (was N+1 each)
+        student_ids = [s["id"] for s in students]
+        prog_res  = sb.table("fluency_progress").select("*").in_("student_id", student_ids).execute()
+        prog_map  = {r["student_id"]: r for r in (prog_res.data or [])}
+        sess_res  = sb.table("fluency_sessions").select("*").in_("student_id", student_ids).order("created_at").execute()
+        sess_map  = {}
+        for row in (sess_res.data or []):
+            sess_map.setdefault(row["student_id"], []).append(row)
+
         result = []
         for student in students:
             s_id = student["id"]
-            d    = _get_fluency_progress(s_id)
-            sess_res = sb.table("fluency_sessions").select("*").eq("student_id", s_id).order("created_at").execute()
-            sess = sess_res.data or []
+            d    = prog_map.get(s_id, {})
+            sess = sess_map.get(s_id, [])
             pcts = [s.get("pct", 0) for s in sess if s.get("pct") is not None]
             avg_accuracy = round(sum(pcts) / len(pcts)) if pcts else 0
             trend = "stable"
@@ -1990,16 +2001,27 @@ def get_fluency_leaderboard(cid: str):
             raise HTTPException(404, "Class not found")
         stu_res = sb.table("students").select("id,name").eq("class_id", cid).execute()
         students = stu_res.data or []
+        if not students:
+            return []
+
+        # Batch-fetch progress and session counts in 2 queries (was N+1 each)
+        student_ids = [s["id"] for s in students]
+        prog_res  = sb.table("fluency_progress").select("*").in_("student_id", student_ids).execute()
+        prog_map  = {r["student_id"]: r for r in (prog_res.data or [])}
+        cnt_res   = sb.table("fluency_sessions").select("student_id").in_("student_id", student_ids).execute()
+        cnt_map   = {}
+        for row in (cnt_res.data or []):
+            cnt_map[row["student_id"]] = cnt_map.get(row["student_id"], 0) + 1
+
         entries = []
         for student in students:
-            s_id = student["id"]
-            d    = _get_fluency_progress(s_id)
-            sess_res = sb.table("fluency_sessions").select("id").eq("student_id", s_id).execute()
-            sess_count = len(sess_res.data or [])
-            if sess_count > 0:
-                best_acc = d.get("best_accuracy", 0)
-                best_ppm = d.get("best_ppm", 0)
-                levels   = [d.get(f"level_{op}", 1) for op in ("add", "sub", "mul", "div")]
+            s_id      = student["id"]
+            d         = prog_map.get(s_id, {})
+            sess_count = cnt_map.get(s_id, 0)
+            best_acc  = d.get("best_accuracy", 0)
+            if best_acc > 0:   # show anyone with progress data, not just session rows
+                best_ppm  = d.get("best_ppm", 0)
+                levels    = [d.get(f"level_{op}", 1) for op in ("add", "sub", "mul", "div")]
                 avg_level = round(sum(levels) / len(levels), 2)
                 composite = round(avg_level * best_acc, 1)
                 entries.append({
