@@ -609,6 +609,19 @@ def get_sessions(classIds: Optional[str] = None, role: Optional[str] = None):
             q = q.in_("class_id", ids)
         res = q.execute()
         rows = res.data or []
+
+        # Backfill missing student names from students table (migrated sessions have empty student_name)
+        missing_ids = list({r["student_id"] for r in rows if not r.get("student_name") and r.get("student_id")})
+        if missing_ids:
+            try:
+                nm_res = sb.table("students").select("id,name").in_("id", missing_ids).execute()
+                nm_map = {r["id"]: r["name"] for r in (nm_res.data or [])}
+                for row in rows:
+                    if not row.get("student_name") and row.get("student_id"):
+                        row["student_name"] = nm_map.get(row["student_id"], "")
+            except Exception:
+                pass
+
         sessions = [_db_session_to_api(r) for r in rows]
 
         if not is_admin:
@@ -1429,6 +1442,62 @@ def admin_overview():
         raise HTTPException(500, f"DB error: {e}")
 
 
+@app.post("/admin/fix-fluency-sessions")
+def fix_fluency_sessions():
+    """One-time migration: re-insert fluency_sessions from fluency_data.json.
+    The original migration included a 'submitted_at' column that doesn't exist
+    in the table, causing all fluency session rows to be skipped.
+    Safe to call multiple times — checks row count first."""
+    try:
+        # Check if already migrated
+        existing = sb.table("fluency_sessions").select("id", count="exact").execute()
+        existing_count = existing.count or len(existing.data or [])
+        if existing_count > 0:
+            return {"ok": True, "skipped": True,
+                    "message": f"fluency_sessions already has {existing_count} rows — skipping migration."}
+
+        fluency_path = os.path.join(os.path.dirname(__file__), "fluency_data.json")
+        with open(fluency_path) as f:
+            fluency = json.load(f)
+
+        fs_rows = []
+        for sid, data in fluency.items():
+            for sess in data.get("sessions", []):
+                fs_rows.append({
+                    "student_id":   sid,
+                    "student_name": sess.get("name") or sess.get("studentName") or "",
+                    "class_id":     sess.get("classId") or "",
+                    "class_name":   sess.get("className") or "",
+                    "test_code":    sess.get("testCode") or sess.get("code") or "",
+                    "submitted":    sess.get("submitted") or "",
+                    "level_add":    int(sess.get("levelAdd") or 1),
+                    "level_sub":    int(sess.get("levelSub") or 1),
+                    "level_mul":    int(sess.get("levelMul") or 1),
+                    "level_div":    int(sess.get("levelDiv") or 1),
+                    "total":        int(sess.get("total") or 0),
+                    "correct":      int(sess.get("correct") or 0),
+                    "pct":          int(sess.get("pct") or 0),
+                    "ppm":          sess.get("ppm"),
+                    "stars":        sess.get("stars"),
+                    "ops":          sess.get("ops"),   # dict — stored as JSONB, no json.dumps
+                })
+
+        if not fs_rows:
+            return {"ok": True, "inserted": 0, "message": "No sessions found in fluency_data.json"}
+
+        # Insert in chunks of 50
+        inserted = 0
+        for i in range(0, len(fs_rows), 50):
+            chunk = fs_rows[i:i+50]
+            sb.table("fluency_sessions").insert(chunk).execute()
+            inserted += len(chunk)
+
+        return {"ok": True, "inserted": inserted,
+                "message": f"Migrated {inserted} fluency sessions from fluency_data.json"}
+    except Exception as e:
+        raise HTTPException(500, f"Migration error: {e}")
+
+
 # ── Teacher accounts ───────────────────────────────────────
 @app.get("/teachers")
 def get_teachers():
@@ -1857,7 +1926,8 @@ def get_fluency_class_report(cid: str):
 
             op_totals = {op: {"total": 0, "correct": 0} for op in ("add", "sub", "mul", "div")}
             for s in sess:
-                for op, data in (s.get("ops") or {}).items():
+                raw_ops = _parse_jsonb(s.get("ops"), {})
+                for op, data in (raw_ops or {}).items():
                     if op in op_totals:
                         op_totals[op]["total"]   += data.get("total", 0)
                         op_totals[op]["correct"] += data.get("correct", 0)
