@@ -1,7 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 google-auth
 requests
 python-dotenv
 supabase==2.28.3
-httpx==0.28.1
