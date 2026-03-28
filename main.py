@@ -1860,7 +1860,8 @@ def save_fluency_session(session: FluencySession):
         }
         sb.table("fluency_progress").upsert(progress_row, on_conflict="student_id").execute()
 
-        # Save fluency session row
+        # Save fluency session row — separate try/except so a column mismatch
+        # never silently swallows the progress upsert or fails the whole endpoint
         submitted_str = session.submitted or time.strftime("%b %d, %Y %I:%M %p")
         fs_row = {
             "student_id":   sid,
@@ -1878,9 +1879,17 @@ def save_fluency_session(session: FluencySession):
             "pct":          pct,
             "ppm":          ppm,
             "stars":        stars,
-            "ops":          ops,
+            "ops":          json.dumps(ops) if ops else None,  # TEXT-safe serialization
         }
-        sb.table("fluency_sessions").insert(fs_row).execute()
+        try:
+            sb.table("fluency_sessions").insert(fs_row).execute()
+        except Exception as fs_err:
+            print(f"⚠ fluency_sessions insert failed: {fs_err}")
+            # Retry without ops in case the column type is incompatible
+            try:
+                sb.table("fluency_sessions").insert({k: v for k, v in fs_row.items() if k != "ops"}).execute()
+            except Exception as fs_err2:
+                print(f"⚠ fluency_sessions insert also failed without ops: {fs_err2}")
 
         return {
             "ok":             True,
