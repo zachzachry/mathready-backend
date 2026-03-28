@@ -7,10 +7,11 @@ from dotenv import load_dotenv
 import os as _os
 load_dotenv(dotenv_path=_os.path.join(_os.path.dirname(__file__), ".env"))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List, Any
 import time, json, os, uuid, random, string
@@ -49,9 +50,22 @@ app.add_middleware(
 )
 
 # ── In-memory state (intentionally NOT persisted to DB) ───
-heartbeats   = {}
-test_control = {"paused": False, "stopped": False, "extensions": {}}
-active_test  = {"questions": [], "title": "Practice Test"}
+heartbeats      = {}
+test_control    = {"paused": False, "stopped": False, "extensions": {}}
+active_test     = {"questions": [], "title": "Practice Test"}
+teacher_sessions: dict = {}  # token (UUID str) → teacher email
+
+# ── Teacher auth dependency ────────────────────────────────
+_bearer = HTTPBearer(auto_error=False)
+
+def require_teacher(creds: HTTPAuthorizationCredentials = Security(_bearer)):
+    """Dependency: validates a teacher session token issued at login."""
+    if not creds:
+        raise HTTPException(401, "Teacher authentication required. Please log in.")
+    token = creds.credentials
+    if token not in teacher_sessions:
+        raise HTTPException(401, "Invalid or expired session. Please log in again.")
+    return teacher_sessions[token]  # returns teacher email
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -779,7 +793,7 @@ def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
 
 
 @app.post("/questions")
-def save_question(q: Question):
+def save_question(q: Question, _teacher: str = Depends(require_teacher)):
     data = q.dict()
     qid = data.get("id", "")
     if not qid or (qid.startswith("Q") and len(qid) < 6 and qid[1:].isdigit()):
@@ -798,7 +812,7 @@ def save_question(q: Question):
 
 
 @app.delete("/questions/{qid}")
-def delete_question(qid: str):
+def delete_question(qid: str, _teacher: str = Depends(require_teacher)):
     try:
         before_res = sb.table("questions").select("id").eq("id", qid).execute()
         before = len(before_res.data or [])
@@ -978,7 +992,7 @@ def _upsert_test_classes(test_id: str, class_ids: list):
 
 
 @app.post("/tests/saved")
-def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None):
+def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     data = test.dict()
     test_id = "t" + uuid.uuid4().hex[:8]
     saved_at = time.strftime("%b %d, %Y %I:%M %p")
@@ -1041,7 +1055,7 @@ def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[s
 
 
 @app.put("/tests/saved/{tid}")
-def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None):
+def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("saved_tests").select("*").eq("id", tid).execute()
         if not res.data:
@@ -1102,7 +1116,7 @@ def set_test_classes(tid: str, body: dict):
 
 
 @app.delete("/tests/saved/{tid}")
-def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None):
+def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("saved_tests").select("*").eq("id", tid).execute()
         if not res.data:
@@ -1124,7 +1138,7 @@ def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[
 
 # ── Bulk seed ──────────────────────────────────────────────
 @app.post("/questions/seed")
-def seed_questions(questions_in: List[Any] = fastapi.Body(...)):
+def seed_questions(questions_in: List[Any] = fastapi.Body(...), _teacher: str = Depends(require_teacher)):
     try:
         existing_res = sb.table("questions").select("id").execute()
         existing_ids = {r["id"] for r in (existing_res.data or [])}
@@ -1194,7 +1208,7 @@ def get_class(cid: str):
 
 
 @app.post("/roster/class")
-def create_class(body: NewClass):
+def create_class(body: NewClass, _teacher: str = Depends(require_teacher)):
     name = body.name.strip()
     try:
         dup_res = sb.table("classes").select("id").ilike("name", name).execute()
@@ -1220,7 +1234,7 @@ def create_class(body: NewClass):
 
 
 @app.put("/roster/class/{cid}")
-def update_class(cid: str, body: UpdateClass):
+def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_teacher)):
     try:
         cls_res = sb.table("classes").select("*").eq("id", cid).execute()
         if not cls_res.data:
@@ -1267,7 +1281,7 @@ def update_class(cid: str, body: UpdateClass):
 
 
 @app.delete("/roster/class/{cid}")
-def delete_class(cid: str):
+def delete_class(cid: str, _teacher: str = Depends(require_teacher)):
     try:
         sb.table("teacher_classes").delete().eq("class_id", cid).execute()
         sb.table("test_classes").delete().eq("class_id", cid).execute()
@@ -1279,7 +1293,7 @@ def delete_class(cid: str):
 
 
 @app.post("/roster/class/{cid}/students")
-def add_students(cid: str, body: AddStudents):
+def add_students(cid: str, body: AddStudents, _teacher: str = Depends(require_teacher)):
     try:
         cls_res = sb.table("classes").select("id").eq("id", cid).execute()
         if not cls_res.data:
@@ -1313,7 +1327,7 @@ def add_students(cid: str, body: AddStudents):
 
 
 @app.delete("/roster/class/{cid}/student/{sid}")
-def remove_student(cid: str, sid: str):
+def remove_student(cid: str, sid: str, _teacher: str = Depends(require_teacher)):
     if not sid or sid == "undefined" or sid == "null":
         raise HTTPException(400, "Invalid student ID")
     try:
@@ -1410,7 +1424,7 @@ def get_teachers():
 
 
 @app.post("/teachers")
-def create_teacher(body: NewTeacher):
+def create_teacher(body: NewTeacher, _teacher: str = Depends(require_teacher)):
     try:
         tid = "t" + uuid.uuid4().hex[:8]
         sb.table("teachers").insert({
@@ -1428,7 +1442,7 @@ def create_teacher(body: NewTeacher):
 
 
 @app.put("/teachers/{tid}")
-def update_teacher(tid: str, body: NewTeacher):
+def update_teacher(tid: str, body: NewTeacher, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("teachers").select("id").eq("id", tid).execute()
         if not res.data:
@@ -1452,7 +1466,7 @@ def update_teacher(tid: str, body: NewTeacher):
 
 
 @app.delete("/teachers/{tid}")
-def delete_teacher(tid: str):
+def delete_teacher(tid: str, _teacher: str = Depends(require_teacher)):
     try:
         sb.table("teacher_classes").delete().eq("teacher_id", tid).execute()
         sb.table("teachers").delete().eq("id", tid).execute()
@@ -1507,12 +1521,15 @@ def google_teacher_verify(body: GoogleVerifyBody):
         if stale:
             for cid in stale:
                 sb.table("teacher_classes").delete().eq("teacher_id", t["id"]).eq("class_id", cid).execute()
+        session_token = str(uuid.uuid4())
+        teacher_sessions[session_token] = email
         return {
-            "role":        "teacher",
-            "teacherRole": t.get("role", "teacher"),
-            "teacherId":   t["id"],
-            "teacherName": t["name"],
-            "classIds":    clean_ids,
+            "role":         "teacher",
+            "teacherRole":  t.get("role", "teacher"),
+            "teacherId":    t["id"],
+            "teacherName":  t["name"],
+            "classIds":     clean_ids,
+            "sessionToken": session_token,
         }
     except HTTPException:
         raise
