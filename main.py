@@ -2318,7 +2318,8 @@ def get_parent_report(student_id: str):
 
     op_totals = {op: {"total": 0, "correct": 0} for op in ("add", "sub", "mul", "div")}
     for s in sess:
-        for op, data in (s.get("ops") or {}).items():
+        raw_ops = _parse_jsonb(s.get("ops"), {})
+        for op, data in (raw_ops or {}).items():
             if op in op_totals:
                 op_totals[op]["total"]   += data.get("total", 0)
                 op_totals[op]["correct"] += data.get("correct", 0)
