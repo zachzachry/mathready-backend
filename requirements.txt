@@ -3,3 +3,4 @@ uvicorn
 google-auth
 requests
 python-dotenv
+supabase
