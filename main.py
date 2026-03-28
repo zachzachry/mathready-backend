@@ -22,10 +22,16 @@ from supabase import create_client
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 # ── Supabase client ────────────────────────────────────────
-sb = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-)
+_sb_error = None
+try:
+    sb = create_client(
+        os.environ["SUPABASE_URL"],
+        os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    )
+except Exception as _e:
+    _sb_error = str(_e)
+    sb = None
+    print(f"⚠ Supabase init failed: {_sb_error}")
 
 app = FastAPI(title="MathReady GA API")
 
@@ -468,13 +474,17 @@ class GoogleVerifyBody(BaseModel):
 # ── Health ─────────────────────────────────────────────────
 @app.get("/")
 def root():
+    import sys, platform
+    if _sb_error:
+        return {"status": "ERROR", "sb_error": _sb_error,
+                "python": sys.version, "platform": platform.platform()}
     try:
         q_count = len((sb.table("questions").select("id").execute().data or []))
         s_count = len((sb.table("test_sessions").select("id").execute().data or []))
         t_count = len((sb.table("saved_tests").select("id").execute().data or []))
         c_count = len((sb.table("classes").select("id").execute().data or []))
-    except Exception:
-        q_count = s_count = t_count = c_count = -1
+    except Exception as e:
+        return {"status": "DB_ERROR", "error": str(e)}
     return {"status": "MathReady GA ✓", "questions": q_count,
             "sessions": s_count, "saved_tests": t_count, "classes": c_count}
 
