@@ -3,5 +3,5 @@ uvicorn
 google-auth
 requests
 python-dotenv
-supabase==2.3.0
-httpx==0.27.0
+supabase==2.28.3
+httpx==0.28.1
