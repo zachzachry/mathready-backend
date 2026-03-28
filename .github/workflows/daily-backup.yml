@@ -1,0 +1,47 @@
+name: Daily Database Backup
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 6 AM UTC = 1–2 AM Eastern daily
+  workflow_dispatch:        # allow manual trigger from GitHub Actions tab
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: backups
+          fetch-depth: 1
+        continue-on-error: true   # branch may not exist yet on first run
+
+      - name: Create backups branch if missing
+        run: |
+          git fetch origin backups 2>/dev/null || true
+          git checkout backups 2>/dev/null || git checkout --orphan backups
+
+      - name: Download backup from API
+        env:
+          BACKUP_SECRET: ${{ secrets.BACKUP_SECRET }}
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          mkdir -p backups
+          DATE=$(date -u +"%Y-%m-%d")
+          curl -f -s "$API_URL/admin/export?key=$BACKUP_SECRET" \
+            -o "backups/backup-$DATE.json"
+          echo "Backup saved: backups/backup-$DATE.json ($(wc -c < backups/backup-$DATE.json) bytes)"
+
+      - name: Keep only last 30 backups
+        run: |
+          cd backups
+          ls -t backup-*.json | tail -n +31 | xargs -r rm --
+          echo "Backup files kept: $(ls backup-*.json | wc -l)"
+
+      - name: Commit and push
+        run: |
+          git config user.name "MilestoneReady Backup Bot"
+          git config user.email "backup@milestoneready.com"
+          git add backups/
+          git diff --staged --quiet || git commit -m "Backup $(date -u +"%Y-%m-%d")"
+          git push origin backups

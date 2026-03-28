@@ -1498,6 +1498,42 @@ def fix_fluency_sessions():
         raise HTTPException(500, f"Migration error: {e}")
 
 
+# ── Database Export / Backup ────────────────────────────────
+@app.get("/admin/export")
+def export_database(key: str = ""):
+    """Full database export for backup purposes.
+    Returns all tables as JSON. Protected by BACKUP_SECRET env var."""
+    secret = os.environ.get("BACKUP_SECRET", "")
+    if not secret or key != secret:
+        raise HTTPException(403, "Invalid or missing backup key")
+    try:
+        tables = [
+            "students", "classes", "teachers",
+            "test_sessions", "saved_tests", "test_questions", "test_classes",
+            "questions",
+            "fluency_sessions", "fluency_progress",
+        ]
+        export = {"exported_at": __import__("datetime").datetime.utcnow().isoformat() + "Z", "tables": {}}
+        for table in tables:
+            try:
+                # Fetch all rows (paginate in chunks of 1000)
+                all_rows = []
+                offset = 0
+                while True:
+                    res = sb.table(table).select("*").range(offset, offset + 999).execute()
+                    chunk = res.data or []
+                    all_rows.extend(chunk)
+                    if len(chunk) < 1000:
+                        break
+                    offset += 1000
+                export["tables"][table] = all_rows
+            except Exception as te:
+                export["tables"][table] = {"error": str(te)}
+        return export
+    except Exception as e:
+        raise HTTPException(500, f"Export error: {e}")
+
+
 # ── Teacher accounts ───────────────────────────────────────
 @app.get("/teachers")
 def get_teachers():
