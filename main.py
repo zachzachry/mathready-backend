@@ -22,10 +22,10 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 app = FastAPI(title="MathReady GA API")
 
-# ── CORS — only allow our Vercel frontend ─────────────────
+# ── CORS — allow all frontend origins ─────────────────────
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
-    "https://mathready-frontend.vercel.app,http://localhost:3000,http://localhost:8001"
+    "https://milestoneready.com,https://www.milestoneready.com,https://mathready-frontend.vercel.app,http://localhost:3000,http://localhost:8001"
 ).split(",")
 
 app.add_middleware(
