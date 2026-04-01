@@ -508,6 +508,9 @@ class GoogleVerifyBody(BaseModel):
     code:    Optional[str] = None
     classId: Optional[str] = None
 
+class RegradeBody(BaseModel):
+    correct: Any
+
 
 # ── Health ─────────────────────────────────────────────────
 @app.get("/")
@@ -857,6 +860,43 @@ def delete_question(qid: str, _teacher: str = Depends(require_teacher)):
         return {"ok": True, "removed": before}
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
+
+
+@app.post("/questions/{question_id}/regrade")
+def regrade_question(question_id: str, body: RegradeBody, _teacher: str = Depends(require_teacher)):
+    new_correct = body.correct
+    try:
+        q_res = sb.table("questions").select("*").eq("id", question_id).execute()
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+    if not q_res.data:
+        raise HTTPException(404, f"Question {question_id} not found")
+    try:
+        sb.table("questions").update({"correct": new_correct}).eq("id", question_id).execute()
+    except Exception as e:
+        raise HTTPException(500, f"DB error updating question: {e}")
+    try:
+        sess_res = sb.table("test_sessions").select("id,test_code,answers,score,total").execute()
+        all_sessions = sess_res.data or []
+    except Exception as e:
+        raise HTTPException(500, f"DB error fetching sessions: {e}")
+    affected = [s for s in all_sessions if question_id in (_parse_jsonb(s.get("answers"), {}) or {})]
+    updated_count = 0
+    for sess in affected:
+        answers = _parse_jsonb(sess.get("answers"), {})
+        result = _server_score(sess.get("test_code", ""), answers)
+        if result is None:
+            continue
+        new_score, new_total = result
+        new_pct = round(new_score / new_total * 100) if new_total else 0
+        if new_score == sess.get("score") and new_total == sess.get("total"):
+            continue
+        try:
+            sb.table("test_sessions").update({"score": new_score, "total": new_total, "pct": new_pct}).eq("id", sess["id"]).execute()
+            updated_count += 1
+        except Exception:
+            pass
+    return {"ok": True, "question_id": question_id, "updated_sessions": updated_count}
 
 
 # ── Active Test ────────────────────────────────────────────
