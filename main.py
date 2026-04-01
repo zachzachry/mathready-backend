@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import time, json, os, uuid, random, string
+import time, json, os, uuid, random, string, hmac, hashlib, base64
 import uvicorn
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -53,19 +53,51 @@ app.add_middleware(
 heartbeats      = {}
 test_control    = {"paused": False, "stopped": False, "extensions": {}}
 active_test     = {"questions": [], "title": "Practice Test"}
-teacher_sessions: dict = {}  # token (UUID str) → teacher email
+teacher_sessions: dict = {}  # token → teacher email (in-memory cache)
+
+# ── Persistent teacher token helpers ──────────────────────
+# Tokens are HMAC-signed so they survive server restarts.
+# No new DB table needed — the signature is verified against
+# the service role key (a stable, pre-existing secret).
+
+def _token_secret() -> bytes:
+    return (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "mr_fallback_secret").encode()
+
+def _make_teacher_token(email: str) -> str:
+    sig = hmac.new(_token_secret(), email.lower().encode(), hashlib.sha256).hexdigest()
+    raw = f"{email.lower()}:{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+def _verify_teacher_token(token: str):
+    """Returns email if valid HMAC token, None otherwise."""
+    try:
+        raw = base64.urlsafe_b64decode(token.encode() + b"==").decode()
+        email, sig = raw.rsplit(":", 1)
+        expected = hmac.new(_token_secret(), email.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig, expected):
+            return email
+    except Exception:
+        pass
+    return None
 
 # ── Teacher auth dependency ────────────────────────────────
 _bearer = HTTPBearer(auto_error=False)
 
 def require_teacher(creds: HTTPAuthorizationCredentials = Security(_bearer)):
-    """Dependency: validates a teacher session token issued at login."""
+    """Validates a teacher session token. Accepts both legacy UUID tokens
+    (in-memory) and the newer restart-safe HMAC tokens."""
     if not creds:
         raise HTTPException(401, "Teacher authentication required. Please log in.")
     token = creds.credentials
-    if token not in teacher_sessions:
-        raise HTTPException(401, "Invalid or expired session. Please log in again.")
-    return teacher_sessions[token]  # returns teacher email
+    # Fast path: cached in memory
+    if token in teacher_sessions:
+        return teacher_sessions[token]
+    # Fallback: verify as HMAC token (survives restarts)
+    email = _verify_teacher_token(token)
+    if email:
+        teacher_sessions[token] = email  # cache for this process run
+        return email
+    raise HTTPException(401, "Invalid or expired session. Please log in again.")
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -1690,7 +1722,7 @@ def google_teacher_verify(body: GoogleVerifyBody):
         if stale:
             for cid in stale:
                 sb.table("teacher_classes").delete().eq("teacher_id", t["id"]).eq("class_id", cid).execute()
-        session_token = str(uuid.uuid4())
+        session_token = _make_teacher_token(email)
         teacher_sessions[session_token] = email
         return {
             "role":         "teacher",
