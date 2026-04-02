@@ -2383,8 +2383,9 @@ def get_student_diagnosis(student_id: str):
                 "pct":        s.get("pct", 0),
                 "score":      s.get("score", 0),
                 "total":      s.get("total", 0),
-                "timeUsed":   s.get("timeUsed", ""),
-                "violations": s.get("violations", 0),
+                "timeUsed":    s.get("timeUsed", ""),
+                "violations":  s.get("violations", 0),
+                "violationLog": s.get("violationLog", []),
             }
             for s in sorted(student_sessions, key=lambda x: x.get("submitted", ""))
         ],
