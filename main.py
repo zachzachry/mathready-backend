@@ -721,7 +721,7 @@ def delete_sessions_by_test(code: str):
 
 
 @app.get("/test/review/{code}")
-def get_test_review(code: str, classId: Optional[str] = None):
+def get_test_review(code: str, classId: Optional[str] = None, classIds: Optional[str] = None):
     code_upper = code.strip().upper()
     try:
         t_res = sb.table("saved_tests").select("id,title,name").eq("code", code_upper).execute()
@@ -732,8 +732,12 @@ def get_test_review(code: str, classId: Optional[str] = None):
         questions = _get_test_questions(test_id)
 
         q = sb.table("test_sessions").select("*").eq("test_code", code_upper).in_("mode", ["test", ""])
-        if classId:
-            q = q.eq("class_id", classId)
+        # Support comma-separated classIds (preferred) or legacy single classId
+        ids = [i.strip() for i in (classIds or "").split(",") if i.strip()]
+        if not ids and classId:
+            ids = [classId]
+        if ids:
+            q = q.in_("class_id", ids)
         sess_res = q.execute()
         test_sessions = [_db_session_to_api(r) for r in (sess_res.data or [])]
 
