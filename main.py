@@ -307,6 +307,8 @@ def _db_saved_test_to_api(row: dict, questions: list = None) -> dict:
         "timeLimitSecs":   row.get("time_limit_secs", 1800),
         "warnSecs":        row.get("warn_secs", 300),
         "oneAttempt":      row.get("one_attempt", False),
+        "shuffleQuestions":row.get("shuffle_questions", False),
+        "shuffleChoices":  row.get("shuffle_choices", False),
         "drillStandards":  row.get("drill_standards") or [],
         "drillCount":      row.get("drill_count", 10),
         "createdBy":       row.get("created_by", ""),
@@ -511,8 +513,10 @@ class SavedTest(BaseModel):
     createdByName:   Optional[str] = ""
     visibility:      Optional[str] = "private"
     sharedWith:      Optional[List[str]] = []
-    adminScoresOnly: Optional[bool] = False
-    closeDate:       Optional[str] = None
+    adminScoresOnly:  Optional[bool] = False
+    closeDate:        Optional[str] = None
+    shuffleQuestions: Optional[bool] = False
+    shuffleChoices:   Optional[bool] = False
 
 class NewClass(BaseModel):
     name: str
@@ -903,8 +907,14 @@ def regrade_question(question_id: str, body: RegradeBody, _teacher: str = Depend
         raise HTTPException(500, f"DB error: {e}")
     if not q_res.data:
         raise HTTPException(404, f"Question {question_id} not found")
+    # For multiselect the correct answers live in the "answer" column;
+    # update both so grading stays consistent regardless of which field is read.
+    q_type = (q_res.data[0].get("type") or "").lower()
+    update_fields = {"correct": new_correct}
+    if q_type == "multiselect":
+        update_fields["answer"] = new_correct
     try:
-        sb.table("questions").update({"correct": new_correct}).eq("id", question_id).execute()
+        sb.table("questions").update(update_fields).eq("id", question_id).execute()
     except Exception as e:
         raise HTTPException(500, f"DB error updating question: {e}")
     try:
@@ -977,6 +987,8 @@ def get_test_by_code(code: str):
             "timeLimitSecs":  match.get("time_limit_secs", 1800),
             "warnSecs":       match.get("warn_secs", 300),
             "oneAttempt":     match.get("one_attempt", False),
+            "shuffleQuestions":match.get("shuffle_questions", False),
+            "shuffleChoices": match.get("shuffle_choices", False),
             "classIds":       class_ids,
             "roster":         roster_classes,
         }
@@ -1025,9 +1037,11 @@ def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None)
                 "drill_count":    t.get("drill_count", 10),
                 "drill_standards":t.get("drill_standards") or [],
                 "classIds":       class_ids,
-                "oneAttempt":     t.get("one_attempt", False),
-                "untimed":        t.get("untimed", False),
-                "timeLimitSecs":  t.get("time_limit_secs", 1800),
+                "oneAttempt":      t.get("one_attempt", False),
+                "shuffleQuestions":t.get("shuffle_questions", False),
+                "shuffleChoices":  t.get("shuffle_choices", False),
+                "untimed":         t.get("untimed", False),
+                "timeLimitSecs":   t.get("time_limit_secs", 1800),
                 "adaptive":       t.get("adaptive", False),
                 "subject":        t.get("subject", "math"),
                 "createdBy":      t.get("created_by", ""),
@@ -1142,7 +1156,9 @@ def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[s
             "untimed":          data.get("untimed", False),
             "time_limit_secs":  data.get("timeLimitSecs", 1800),
             "warn_secs":        data.get("warnSecs", 300),
-            "one_attempt":      data.get("oneAttempt", False),
+            "one_attempt":        data.get("oneAttempt", False),
+            "shuffle_questions":  data.get("shuffleQuestions", False),
+            "shuffle_choices":    data.get("shuffleChoices", False),
             "drill_standards":  data.get("drillStandards") or [],
             "drill_count":      data.get("drillCount", 10),
             "created_by":       created_by,
@@ -1191,7 +1207,9 @@ def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None
             "untimed":          test.untimed,
             "time_limit_secs":  test.timeLimitSecs,
             "warn_secs":        test.warnSecs,
-            "one_attempt":      test.oneAttempt,
+            "one_attempt":        test.oneAttempt,
+            "shuffle_questions":  test.shuffleQuestions,
+            "shuffle_choices":    test.shuffleChoices,
             "subject":          test.subject or "math",
             "visibility":       visibility,
             "shared_with":      test.sharedWith or [],
