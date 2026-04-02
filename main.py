@@ -242,6 +242,8 @@ def _db_question_to_api(row: dict) -> dict:
         "assetType":     row.get("asset_type"),
         "assetReuse":    row.get("asset_reuse"),
         "assetSize":     row.get("asset_size"),
+        "createdBy":     row.get("created_by", ""),
+        "createdByName": row.get("created_by_name", ""),
     }
 
 
@@ -267,6 +269,8 @@ def _api_question_to_db(data: dict) -> dict:
         "asset_type":     data.get("assetType"),
         "asset_reuse":    data.get("assetReuse"),
         "asset_size":     data.get("assetSize"),
+        "created_by":     data.get("createdBy", ""),
+        "created_by_name":data.get("createdByName", ""),
     }
 
 
@@ -482,6 +486,8 @@ class Question(BaseModel):
     assetReuse:    Optional[bool] = None
     assetSize:     Optional[str] = None
     subject:       Optional[str] = "math"
+    createdBy:     Optional[str] = ""
+    createdByName: Optional[str] = ""
 
 class ActiveTest(BaseModel):
     questions: List[Any]
