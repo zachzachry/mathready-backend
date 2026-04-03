@@ -1496,7 +1496,14 @@ def admin_overview():
                             if s.get("classId") == cls["id"] or s.get("className") == cls["name"]]
             test_sessions_cls = [s for s in cls_sessions if s.get("mode", "test") in ("test", "")]
             drill_sessions    = [s for s in cls_sessions if s.get("mode") == "drill"]
-            scores = [s["score"] for s in test_sessions_cls if "score" in s]
+            # Deduplicate: latest session per student, then average pct (not raw score)
+            latest = {}
+            for s in test_sessions_cls:
+                sid = s.get("studentId") or s.get("studentName") or s.get("name") or ""
+                if not sid: continue
+                if sid not in latest or s.get("submitted","") > latest[sid].get("submitted",""):
+                    latest[sid] = s
+            scores = [s["pct"] for s in latest.values() if "pct" in s]
             avg = round(sum(scores)/len(scores), 1) if scores else None
             std_map = {}
             for s in test_sessions_cls:
