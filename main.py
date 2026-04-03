@@ -204,7 +204,7 @@ def _grade_answer(q, given):
             is_dot = asset_type in ("dot", "pin")
             snap_points = q.get("snapPoints") or []
             correct_sps = [sp for sp in snap_points if correct_map.get(sp["id"])]
-            TOL = 2.5
+            TOL = 8  # generous for touch/tablet input by young students
             if not isinstance(g, list) or len(g) != len(correct_sps):
                 return False
             matched = 0
