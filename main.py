@@ -305,6 +305,7 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "gcCourseId":    row.get("gc_course_id"),
         "hideTimer":     row.get("hide_timer", True),
         "drillDuration": row.get("drill_duration", 180),
+        "joinCode":      row.get("join_code", ""),
         "students":      students if students is not None else [],
     }
 
@@ -563,6 +564,10 @@ class GoogleVerifyBody(BaseModel):
     token:   str
     code:    Optional[str] = None
     classId: Optional[str] = None
+
+class EnrollBody(BaseModel):
+    token:    str
+    joinCode: str
 
 class RegradeBody(BaseModel):
     correct: Any
@@ -1509,11 +1514,18 @@ def create_class(body: NewClass, _teacher: str = Depends(require_teacher)):
         if dup_res.data:
             raise HTTPException(400, f'A class named "{name}" already exists. Use a unique name.')
         cls_id = "c" + uuid.uuid4().hex[:8]
+        # Generate a unique 6-char join code
+        jc = gen_code()
+        for _ in range(10):
+            if not sb.table("classes").select("id").eq("join_code", jc).execute().data:
+                break
+            jc = gen_code()
         sb.table("classes").insert({
             "id":           cls_id,
             "name":         name,
             "gc_course_id": body.gcCourseId,
             "hide_timer":   True,
+            "join_code":    jc,
         }).execute()
         if body.teacherId:
             sb.table("teacher_classes").insert({
@@ -1986,6 +1998,59 @@ def google_verify(body: GoogleVerifyBody):
         if student:
             return {"ok": True, "student": student, "cls": {"id": cls["id"], "name": cls["name"]}}
         raise HTTPException(403, "Your Google account is not on the class roster. Check with your teacher.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+@app.post("/auth/google/enroll")
+def google_enroll(body: EnrollBody):
+    """Self-enroll: verify Google identity, find class by join_code, create student if needed."""
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "Google auth not configured on server.")
+    try:
+        info = id_token.verify_oauth2_token(body.token, google_requests.Request(), GOOGLE_CLIENT_ID)
+    except Exception as e:
+        raise HTTPException(401, f"Invalid Google token: {e}")
+
+    sub  = info.get("sub", "")
+    name = (info.get("name") or "").strip()
+    if not sub:  raise HTTPException(400, "No Google user ID in token.")
+    if not name: raise HTTPException(400, "No name in Google token.")
+
+    jc = body.joinCode.strip().upper()
+    try:
+        cls_res = sb.table("classes").select("*").eq("join_code", jc).execute()
+        if not cls_res.data:
+            raise HTTPException(404, "Class code not found. Check with your teacher.")
+        cls = cls_res.data[0]
+        cid = cls["id"]
+
+        # Check if student already exists in this class
+        existing = sb.table("students").select("*").eq("class_id", cid).execute()
+        for s in (existing.data or []):
+            if s.get("google_sub") == sub:
+                return {"ok": True, "student": _db_student_to_api(s),
+                        "cls": {"id": cid, "name": cls["name"]}}
+            if s.get("name", "").strip().lower() == name.lower():
+                # Name already exists — link their google_sub
+                sb.table("students").update({"google_sub": sub}).eq("id", s["id"]).execute()
+                s["google_sub"] = sub
+                return {"ok": True, "student": _db_student_to_api(s),
+                        "cls": {"id": cid, "name": cls["name"]}}
+
+        # Brand-new student — create record
+        sid = "s" + uuid.uuid4().hex[:8]
+        sb.table("students").insert({
+            "id": sid, "class_id": cid, "name": name, "google_sub": sub
+        }).execute()
+        return {
+            "ok": True, "enrolled": True,
+            "student": {"id": sid, "name": name, "googleSub": sub,
+                        "extendedTime": False, "reduceChoices": False},
+            "cls": {"id": cid, "name": cls["name"]},
+        }
     except HTTPException:
         raise
     except Exception as e:
