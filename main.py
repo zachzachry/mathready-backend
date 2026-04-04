@@ -15,6 +15,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional, List, Any
 import time, json, os, uuid, random, string, hmac, hashlib, base64
+from datetime import datetime, timezone
 import uvicorn
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -51,7 +52,17 @@ app.add_middleware(
 
 # ── In-memory state (intentionally NOT persisted to DB) ───
 heartbeats      = {}
-test_control    = {"paused": False, "stopped": False, "extensions": {}}
+test_controls: dict = {}   # keyed by testCode (uppercase); each value = per-session control state
+
+def _default_control(class_id=""):
+    return {
+        "paused": False, "stopped": False,
+        "gate": True,    # True = students held in waiting room; False = go
+        "testing": False,
+        "extensions": {},
+        "classId": class_id,
+        "launchedAt": time.time(),
+    }
 active_test     = {"questions": [], "title": "Practice Test"}
 teacher_sessions: dict = {}  # token → teacher email (in-memory cache)
 
@@ -464,7 +475,10 @@ class Session(BaseModel):
     questionTimes:Optional[list] = []
 
 class Heartbeat(BaseModel):
-    name: str; current: int
+    name:    str
+    current: int
+    code:    Optional[str] = ""
+    phase:   Optional[str] = "testing"
 
 class Question(BaseModel):
     id:            Optional[str] = None
@@ -576,6 +590,23 @@ def root():
 @app.post("/submit")
 def submit_session(session: Session):
     d = session.dict()
+
+    # Enforce close date
+    code = d.get("testCode", "").upper()
+    if code:
+        try:
+            tr = sb.table("saved_tests").select("close_date").eq("code", code).maybe_single().execute()
+            if tr.data:
+                cd = (tr.data or {}).get("close_date")
+                if cd:
+                    close_dt = datetime.fromisoformat(cd.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > close_dt:
+                        raise HTTPException(403, "Test window has closed")
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # don't block submission on a DB read error
+
     result = _server_score(d.get("testCode"), d.get("answers", {}))
     if result:
         score, total = result
@@ -606,9 +637,16 @@ def submit_session(session: Session):
     except Exception as e:
         raise HTTPException(500, f"Failed to save session: {e}")
 
-    # Auto-complete assignment
-    sid = d.get("studentId", "")
+    # Delete in-progress draft now that session is submitted
+    sid  = d.get("studentId", "")
     code = d.get("testCode", "").upper()
+    if sid and code:
+        try:
+            sb.table("session_drafts").delete().eq("student_id", sid).eq("test_code", code).execute()
+        except Exception:
+            pass
+
+    # Auto-complete assignment
     if sid and code:
         try:
             ta_res = sb.table("test_assignments").select("id").eq("test_code", code).execute()
@@ -826,41 +864,159 @@ def clear_sessions(mode: Optional[str] = None):
 
 @app.post("/heartbeat")
 def post_heartbeat(hb: Heartbeat):
-    heartbeats[hb.name] = {"last_ping": time.time(), "current_question": hb.current}
+    code = (hb.code or "").strip().upper()
+    key = f"{code}:{hb.name}" if code else hb.name  # backward-compat: bare name if no code
+    heartbeats[key] = {
+        "last_ping": time.time(),
+        "current_question": hb.current,
+        "code": code,
+        "phase": hb.phase or "testing",
+    }
     return {"ok": True}
 
 
 @app.get("/active")
-def get_active_students():
+def get_active_students(code: str = ""):
+    code = code.strip().upper()
     now = time.time()
-    return [{"name": n, "current_question": d["current_question"],
-             "seconds_since_ping": round(now - d["last_ping"]),
-             "status": "active" if now - d["last_ping"] < 35 else "slow"}
-            for n, d in heartbeats.items() if now - d["last_ping"] < 60]
+    result = []
+    for k, d in heartbeats.items():
+        if now - d["last_ping"] >= 60:
+            continue
+        if code:
+            if not k.startswith(f"{code}:"):
+                continue
+            name = k[len(code)+1:]
+        else:
+            name = k  # backward-compat: unscoped key
+        result.append({
+            "name": name,
+            "current_question": d["current_question"],
+            "seconds_since_ping": round(now - d["last_ping"]),
+            "phase": d.get("phase", "testing"),
+            "status": "active" if now - d["last_ping"] < 35 else "slow",
+        })
+    return result
 
 
-# ── Test Control ───────────────────────────────────────────
+# ── Session Drafts (crash recovery / Chromebook reboot) ────
+@app.put("/sessions/draft")
+def save_draft(body: dict):
+    sid  = body.get("studentId", "")
+    code = body.get("testCode",  "").upper()
+    if not sid or not code:
+        raise HTTPException(400, "studentId and testCode required")
+    row = {
+        "student_id": sid,
+        "test_code":  code,
+        "answers":    body.get("answers", {}),
+        "cur":        body.get("cur", 0),
+        "flags":      body.get("flags", {}),
+        "end_time":   body.get("endTime"),   # Unix ms timestamp or null if untimed
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        sb.table("session_drafts").upsert(row, on_conflict="student_id,test_code").execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+@app.get("/sessions/draft/{student_id}/{test_code}")
+def get_draft(student_id: str, test_code: str):
+    try:
+        res = sb.table("session_drafts").select("*") \
+                .eq("student_id", student_id) \
+                .eq("test_code", test_code.upper()) \
+                .maybe_single().execute()
+        return res.data or {}
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+@app.delete("/sessions/draft/{student_id}/{test_code}")
+def delete_draft(student_id: str, test_code: str):
+    try:
+        sb.table("session_drafts").delete() \
+            .eq("student_id", student_id) \
+            .eq("test_code", test_code.upper()).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+# ── Test Control (per-code session management) ─────────────
 @app.get("/test/control")
-def get_test_control():
-    return test_control
+def get_test_control(code: str = ""):
+    code = code.strip().upper()
+    if not code:
+        # Backward-compat: return neutral "running" state for unscoped polls
+        return {"paused": False, "stopped": False, "gate": False, "testing": True, "extensions": {}}
+    ctrl = test_controls.get(code)
+    # Auto-expire sessions older than 24 hours
+    if ctrl and time.time() - ctrl.get("launchedAt", 0) > 86400:
+        del test_controls[code]
+        ctrl = None
+    return ctrl or {"paused": False, "stopped": False, "gate": False, "testing": True, "extensions": {}}
+
 
 @app.post("/test/control")
-def post_test_control(body: dict):
-    if "paused"  in body: test_control["paused"]  = bool(body["paused"])
-    if "stopped" in body: test_control["stopped"] = bool(body["stopped"])
+def post_test_control(body: dict, teacher: str = Depends(require_teacher)):
+    code = body.get("code", "").strip().upper()
+    if not code:
+        raise HTTPException(400, "code required")
+    action = body.get("action", "")
+
+    if action == "launch":
+        test_controls[code] = _default_control(body.get("classId", ""))
+        return test_controls[code]
+
+    if action == "begin":
+        if code not in test_controls:
+            raise HTTPException(404, "No session found — click Launch first")
+        test_controls[code].update({"gate": False, "testing": True})
+        return test_controls[code]
+
+    if action == "end":
+        test_controls.pop(code, None)
+        # Clear heartbeats for this session
+        stale = [k for k in heartbeats if k.startswith(f"{code}:")]
+        for k in stale:
+            del heartbeats[k]
+        return {"ok": True}
+
+    # Legacy patch-style updates (pause/stop/clear) — used by existing Dashboard controls
+    if code not in test_controls:
+        raise HTTPException(404, "No active session for this code. Launch first.")
+    ctrl = test_controls[code]
+    if "paused"  in body: ctrl["paused"]  = bool(body["paused"])
+    if "stopped" in body: ctrl["stopped"] = bool(body["stopped"])
     if body.get("stopped") == False and body.get("paused") == False:
-        test_control["extensions"] = {}
-    return test_control
+        ctrl["extensions"] = {}
+    return ctrl
+
 
 @app.post("/test/control/extend")
-def extend_student_time(body: dict):
+def extend_student_time(body: dict, teacher: str = Depends(require_teacher)):
+    code  = body.get("code", "").strip().upper()
     name  = body.get("studentName", "").strip()
     extra = int(body.get("extraSecs", 0))
     if not name or extra <= 0:
         raise HTTPException(400, "studentName and extraSecs required")
-    current = test_control["extensions"].get(name, 0)
-    test_control["extensions"][name] = current + extra
-    return {"ok": True, "studentName": name, "totalExtraSecs": test_control["extensions"][name]}
+    if code and code not in test_controls:
+        raise HTTPException(404, "No active session")
+    ctrl = test_controls.get(code) or {}
+    exts = ctrl.get("extensions", {})
+    exts[name] = exts.get(name, 0) + extra
+    if code in test_controls:
+        test_controls[code]["extensions"] = exts
+    return {"ok": True, "studentName": name, "totalExtraSecs": exts.get(name, extra)}
+
+
+@app.get("/test/control/all")
+def get_all_sessions(teacher: str = Depends(require_teacher)):
+    """Return all currently active test sessions — for Dashboard session picker."""
+    return [{"code": code, **ctrl} for code, ctrl in test_controls.items()]
 
 
 # ── Question Bank ──────────────────────────────────────────
@@ -1001,6 +1157,7 @@ def get_test_by_code(code: str):
             "shuffleChoices": match.get("shuffle_choices", False),
             "classIds":       class_ids,
             "roster":         roster_classes,
+            "closeDate":      match.get("close_date"),
         }
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
@@ -2782,6 +2939,74 @@ def reopen_assignment(aid: str, body: dict):
         if sid:
             sb.table("assignment_students").update({"completed": False}).eq("assignment_id", aid).eq("student_id", sid).execute()
         return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+@app.patch("/assignments/{aid}/students/add")
+def add_students_to_assignment(aid: str, body: dict):
+    """Add new students to an existing assignment without resetting completed status."""
+    try:
+        res = sb.table("test_assignments").select("id").eq("id", aid).execute()
+        if not res.data:
+            raise HTTPException(404, "Assignment not found")
+        new_ids = body.get("studentIds", [])
+        if new_ids:
+            existing = sb.table("assignment_students").select("student_id").eq("assignment_id", aid).execute()
+            existing_ids = {r["student_id"] for r in (existing.data or [])}
+            to_add = [sid for sid in new_ids if sid not in existing_ids]
+            if to_add:
+                sb.table("assignment_students").insert(
+                    [{"assignment_id": aid, "student_id": sid, "completed": False} for sid in to_add]
+                ).execute()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+@app.patch("/assignments/{aid}/makeup")
+def give_makeup(aid: str, body: dict):
+    """One-click makeup: add a student and extend close date to end of today."""
+    try:
+        # Verify assignment exists
+        res = sb.table("test_assignments").select("*").eq("id", aid).maybe_single().execute()
+        if not res.data:
+            raise HTTPException(404, "Assignment not found")
+        assignment = res.data
+
+        student_id = body.get("studentId", "")
+        if not student_id:
+            raise HTTPException(400, "studentId required")
+
+        # Add student to assignment if not already present
+        existing = sb.table("assignment_students").select("student_id") \
+            .eq("assignment_id", aid).eq("student_id", student_id).execute()
+        if not existing.data:
+            sb.table("assignment_students").insert(
+                {"assignment_id": aid, "student_id": student_id, "completed": False}
+            ).execute()
+        else:
+            # Reset completed so they can retake
+            sb.table("assignment_students").update({"completed": False}) \
+                .eq("assignment_id", aid).eq("student_id", student_id).execute()
+
+        # Extend close date on the saved test to end of today (3 PM local = use UTC end of day as safe default)
+        test_code = assignment.get("test_code", "")
+        if test_code:
+            # Set close date to end of today UTC (23:59)
+            end_of_day = datetime.now(timezone.utc).replace(hour=23, minute=59, second=0, microsecond=0)
+            sb.table("saved_tests").update({"close_date": end_of_day.isoformat()}) \
+                .eq("code", test_code).execute()
+
+        return {
+            "ok": True,
+            "testCode": test_code,
+            "testTitle": assignment.get("test_title", ""),
+        }
     except HTTPException:
         raise
     except Exception as e:
