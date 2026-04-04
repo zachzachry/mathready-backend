@@ -334,6 +334,7 @@ def _db_saved_test_to_api(row: dict, questions: list = None) -> dict:
         "adminScoresOnly": row.get("admin_scores_only", False),
         "closeDate":       row.get("close_date"),
         "saved_at":        row.get("saved_at", ""),
+        "archived":        row.get("archived", False),
         "classIds":        [],  # filled from test_classes join
     }
     if questions is not None:
@@ -1170,7 +1171,8 @@ def get_test_by_code(code: str):
 
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
-def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None):
+def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None,
+                    showArchived: bool = False):
     is_admin = role in ("super_admin", "school_admin")
     try:
         res = sb.table("saved_tests").select("*").execute()
@@ -1187,6 +1189,8 @@ def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None)
             return False
 
         filtered = [t for t in rows if not teacherId or visible(t)]
+        if not showArchived:
+            filtered = [t for t in filtered if not t.get("archived", False)]
 
         # Get class IDs for each test
         result = []
@@ -1222,6 +1226,7 @@ def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None)
                 "sharedWith":     t.get("shared_with") or [],
                 "adminScoresOnly":t.get("admin_scores_only", False),
                 "closeDate":      t.get("close_date"),
+                "archived":       t.get("archived", False),
             })
         return result
     except Exception as e:
@@ -1414,6 +1419,22 @@ def set_test_classes(tid: str, body: dict):
         raise HTTPException(500, f"DB error: {e}")
 
 
+@app.patch("/tests/saved/{tid}/archive")
+def archive_test(tid: str, body: dict, _teacher: str = Depends(require_teacher)):
+    """Toggle archived status on a saved test."""
+    try:
+        res = sb.table("saved_tests").select("id,created_by").eq("id", tid).execute()
+        if not res.data:
+            raise HTTPException(404, "Not found")
+        archived = bool(body.get("archived", True))
+        sb.table("saved_tests").update({"archived": archived}).eq("id", tid).execute()
+        return {"ok": True, "archived": archived}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
 @app.delete("/tests/saved/{tid}")
 def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     try:
@@ -1425,6 +1446,12 @@ def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[
         cb = t.get("created_by", "")
         if cb and cb != teacherId and not is_admin:
             raise HTTPException(403, "Not authorized to delete this test")
+        # Block delete if student sessions exist for this test
+        code = t.get("code", "")
+        if code:
+            sess_res = sb.table("test_sessions").select("id").eq("test_code", code).limit(1).execute()
+            if sess_res.data:
+                raise HTTPException(400, "Cannot delete a test with student submissions. Archive it instead.")
         sb.table("test_questions").delete().eq("test_id", tid).execute()
         sb.table("test_classes").delete().eq("test_id", tid).execute()
         sb.table("saved_tests").delete().eq("id", tid).execute()
