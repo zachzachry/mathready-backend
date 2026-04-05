@@ -28,7 +28,7 @@ jobs:
         run: |
           mkdir -p backups
           DATE=$(date -u +"%Y-%m-%d")
-          curl -f -s "$API_URL/admin/export?key=$BACKUP_SECRET" \
+          curl -f -s -H "Authorization: Bearer $BACKUP_SECRET" "$API_URL/admin/export" \
             -o "backups/backup-$DATE.json"
           echo "Backup saved: backups/backup-$DATE.json ($(wc -c < backups/backup-$DATE.json) bytes)"
 

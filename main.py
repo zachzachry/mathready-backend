@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import os as _os
 load_dotenv(dotenv_path=_os.path.join(_os.path.dirname(__file__), ".env"))
 
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,6 +109,29 @@ def require_teacher(creds: HTTPAuthorizationCredentials = Security(_bearer)):
         teacher_sessions[token] = email  # cache for this process run
         return email
     raise HTTPException(401, "Invalid or expired session. Please log in again.")
+
+
+def _get_teacher_info(email: str) -> dict:
+    """Look up teacher id and role from email. Returns defaults if not found."""
+    try:
+        res = sb.table("teachers").select("id,role").eq("email", email.lower()).execute()
+        if res.data:
+            return {"id": res.data[0]["id"], "role": res.data[0].get("role", "teacher")}
+    except Exception:
+        pass
+    return {"id": None, "role": "teacher"}
+
+
+def optional_teacher_email(creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer)) -> Optional[str]:
+    """Returns teacher email if a valid token is provided, None otherwise (no 401)."""
+    if not creds:
+        return None
+    email = _verify_teacher_token(creds.credentials)
+    if email:
+        return email
+    if creds.credentials in teacher_sessions:
+        return teacher_sessions[creds.credentials]
+    return None
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -419,19 +442,22 @@ def _server_score(test_code, answers):
 
 
 def _get_roster(class_ids=None) -> list:
-    """Fetch classes with embedded students from DB."""
+    """Fetch classes with embedded students from DB (2 queries total)."""
     try:
         q = sb.table("classes").select("*")
         if class_ids:
             q = q.in_("id", list(class_ids))
         cls_res = q.execute()
         classes = cls_res.data or []
-        result = []
-        for cls in classes:
-            stu_res = sb.table("students").select("*").eq("class_id", cls["id"]).execute()
-            students = [_db_student_to_api(s) for s in (stu_res.data or [])]
-            result.append(_db_class_to_api(cls, students))
-        return result
+        if not classes:
+            return []
+        # Batch-fetch all students in one query then group by class_id
+        cids = [c["id"] for c in classes]
+        stu_res = sb.table("students").select("*").in_("class_id", cids).execute()
+        students_by_class: dict = {}
+        for s in (stu_res.data or []):
+            students_by_class.setdefault(s["class_id"], []).append(_db_student_to_api(s))
+        return [_db_class_to_api(cls, students_by_class.get(cls["id"], [])) for cls in classes]
     except Exception as e:
         raise HTTPException(500, f"DB error fetching roster: {e}")
 
@@ -685,7 +711,9 @@ def check_attempt(code: str, studentId: str = "", studentName: str = ""):
 
 
 @app.get("/sessions")
-def get_sessions(classIds: Optional[str] = None, role: Optional[str] = None):
+def get_sessions(classIds: Optional[str] = None,
+                 teacher_email: Optional[str] = Depends(optional_teacher_email)):
+    role = _get_teacher_info(teacher_email)["role"] if teacher_email else "teacher"
     is_admin = role in ("super_admin", "school_admin")
     try:
         q = sb.table("test_sessions").select("*")
@@ -738,7 +766,7 @@ def get_student_history(student_id: str):
 
 
 @app.delete("/sessions/class/{cid}")
-def clear_class_sessions(cid: str):
+def clear_class_sessions(cid: str, _teacher: str = Depends(require_teacher)):
     try:
         cls_res = sb.table("classes").select("id,name").eq("id", cid).execute()
         if not cls_res.data:
@@ -759,7 +787,7 @@ def clear_class_sessions(cid: str):
 
 
 @app.delete("/sessions/test/{code}")
-def delete_sessions_by_test(code: str):
+def delete_sessions_by_test(code: str, _teacher: str = Depends(require_teacher)):
     code_upper = code.strip().upper()
     try:
         before_res = sb.table("test_sessions").select("id").eq("test_code", code_upper).execute()
@@ -1171,9 +1199,10 @@ def get_test_by_code(code: str):
 
 # ── Saved Tests ────────────────────────────────────────────
 @app.get("/tests/saved")
-def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None,
-                    showArchived: bool = False):
-    is_admin = role in ("super_admin", "school_admin")
+def get_saved_tests(teacherId: Optional[str] = None, showArchived: bool = False,
+                    teacher_email: Optional[str] = Depends(optional_teacher_email)):
+    info = _get_teacher_info(teacher_email) if teacher_email else {"id": teacherId, "role": "teacher"}
+    is_admin = info["role"] in ("super_admin", "school_admin")
     try:
         res = sb.table("saved_tests").select("*").execute()
         rows = res.data or []
@@ -1192,16 +1221,30 @@ def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None,
         if not showArchived:
             filtered = [t for t in filtered if not t.get("archived", False)]
 
-        # Get class IDs for each test
+        if not filtered:
+            return []
+
+        # Batch-fetch class IDs and question counts (2 queries instead of 2N)
+        test_ids = [t["id"] for t in filtered]
+        try:
+            tc_res = sb.table("test_classes").select("test_id,class_id").in_("test_id", test_ids).execute()
+            class_ids_map: dict = {}
+            for row in (tc_res.data or []):
+                class_ids_map.setdefault(row["test_id"], []).append(row["class_id"])
+        except Exception:
+            class_ids_map = {}
+        try:
+            tq_res = sb.table("test_questions").select("test_id").in_("test_id", test_ids).execute()
+            q_count_map: dict = {}
+            for row in (tq_res.data or []):
+                q_count_map[row["test_id"]] = q_count_map.get(row["test_id"], 0) + 1
+        except Exception:
+            q_count_map = {}
+
         result = []
         for t in filtered:
-            class_ids = _get_test_class_ids(t["id"])
-            # Count questions via test_questions
-            try:
-                tq_res = sb.table("test_questions").select("question_id").eq("test_id", t["id"]).execute()
-                q_count = len(tq_res.data or [])
-            except Exception:
-                q_count = 0
+            class_ids = class_ids_map.get(t["id"], [])
+            q_count   = q_count_map.get(t["id"], 0)
             result.append({
                 "id":             t["id"],
                 "name":           t.get("name", ""),
@@ -1234,13 +1277,15 @@ def get_saved_tests(teacherId: Optional[str] = None, role: Optional[str] = None,
 
 
 @app.get("/tests/saved/{tid}")
-def get_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None):
+def get_saved_test(tid: str, teacherId: Optional[str] = None,
+                   teacher_email: Optional[str] = Depends(optional_teacher_email)):
     try:
         res = sb.table("saved_tests").select("*").eq("id", tid).execute()
         if not res.data:
             raise HTTPException(404, "Not found")
         t = res.data[0]
-        is_admin = role in ("super_admin", "school_admin")
+        info = _get_teacher_info(teacher_email) if teacher_email else {"id": teacherId, "role": "teacher"}
+        is_admin = info["role"] in ("super_admin", "school_admin")
         class_ids = _get_test_class_ids(tid)
 
         if not is_admin and t.get("visibility") == "global":
@@ -1406,7 +1451,7 @@ def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None
 
 
 @app.patch("/tests/saved/{tid}/classes")
-def set_test_classes(tid: str, body: dict):
+def set_test_classes(tid: str, body: dict, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("saved_tests").select("id").eq("id", tid).execute()
         if not res.data:
@@ -1420,12 +1465,17 @@ def set_test_classes(tid: str, body: dict):
 
 
 @app.patch("/tests/saved/{tid}/archive")
-def archive_test(tid: str, body: dict, _teacher: str = Depends(require_teacher)):
+def archive_test(tid: str, body: dict, teacher_email: str = Depends(require_teacher)):
     """Toggle archived status on a saved test."""
     try:
         res = sb.table("saved_tests").select("id,created_by").eq("id", tid).execute()
         if not res.data:
             raise HTTPException(404, "Not found")
+        t = res.data[0]
+        info = _get_teacher_info(teacher_email)
+        is_admin = info["role"] in ("super_admin", "school_admin")
+        if t.get("created_by") and t["created_by"] != info["id"] and not is_admin:
+            raise HTTPException(403, "Not authorized to archive this test")
         archived = bool(body.get("archived", True))
         sb.table("saved_tests").update({"archived": archived}).eq("id", tid).execute()
         return {"ok": True, "archived": archived}
@@ -1436,15 +1486,16 @@ def archive_test(tid: str, body: dict, _teacher: str = Depends(require_teacher))
 
 
 @app.delete("/tests/saved/{tid}")
-def delete_saved_test(tid: str, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
+def delete_saved_test(tid: str, teacher_email: str = Depends(require_teacher)):
     try:
         res = sb.table("saved_tests").select("*").eq("id", tid).execute()
         if not res.data:
             raise HTTPException(404, "Not found")
         t = res.data[0]
-        is_admin = role in ("super_admin", "school_admin")
+        info = _get_teacher_info(teacher_email)
+        is_admin = info["role"] in ("super_admin", "school_admin")
         cb = t.get("created_by", "")
-        if cb and cb != teacherId and not is_admin:
+        if cb and cb != info["id"] and not is_admin:
             raise HTTPException(403, "Not authorized to delete this test")
         # Block delete if student sessions exist for this test
         code = t.get("code", "")
@@ -1746,7 +1797,10 @@ def admin_overview():
 
 
 @app.post("/admin/fix-fluency-sessions")
-def fix_fluency_sessions():
+def fix_fluency_sessions(teacher_email: str = Depends(require_teacher)):
+    info = _get_teacher_info(teacher_email)
+    if info["role"] not in ("super_admin", "school_admin"):
+        raise HTTPException(403, "Admin access required")
     """One-time migration: re-insert fluency_sessions from fluency_data.json.
     The original migration included a 'submitted_at' column that doesn't exist
     in the table, causing all fluency session rows to be skipped.
@@ -1803,11 +1857,13 @@ def fix_fluency_sessions():
 
 # ── Database Export / Backup ────────────────────────────────
 @app.get("/admin/export")
-def export_database(key: str = ""):
+def export_database(request: Request):
     """Full database export for backup purposes.
-    Returns all tables as JSON. Protected by BACKUP_SECRET env var."""
+    Returns all tables as JSON. Protected by BACKUP_SECRET env var via Authorization header."""
     secret = os.environ.get("BACKUP_SECRET", "")
-    if not secret or key != secret:
+    auth = request.headers.get("Authorization", "")
+    provided = auth.removeprefix("Bearer ").strip()
+    if not secret or provided != secret:
         raise HTTPException(403, "Invalid or missing backup key")
     try:
         tables = [
@@ -1856,7 +1912,10 @@ def get_teachers():
 
 
 @app.post("/teachers")
-def create_teacher(body: NewTeacher, _teacher: str = Depends(require_teacher)):
+def create_teacher(body: NewTeacher, teacher_email: str = Depends(require_teacher)):
+    info = _get_teacher_info(teacher_email)
+    if info["role"] not in ("super_admin", "school_admin"):
+        raise HTTPException(403, "Admin access required to create teachers")
     try:
         tid = "t" + uuid.uuid4().hex[:8]
         sb.table("teachers").insert({
@@ -2433,7 +2492,7 @@ def get_fluency_leaderboard(cid: str):
 
 
 @app.delete("/fluency/student/{student_id}")
-def reset_fluency_student(student_id: str):
+def reset_fluency_student(student_id: str, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("fluency_progress").select("student_id").eq("student_id", student_id).execute()
         if not res.data:
@@ -2448,7 +2507,7 @@ def reset_fluency_student(student_id: str):
 
 
 @app.delete("/fluency/class/{cid}")
-def reset_fluency_class(cid: str):
+def reset_fluency_class(cid: str, _teacher: str = Depends(require_teacher)):
     try:
         cls_res = sb.table("classes").select("name").eq("id", cid).execute()
         if not cls_res.data:
@@ -2471,7 +2530,10 @@ def reset_fluency_class(cid: str):
 
 
 @app.delete("/fluency/all")
-def reset_fluency_all():
+def reset_fluency_all(teacher_email: str = Depends(require_teacher)):
+    info = _get_teacher_info(teacher_email)
+    if info["role"] not in ("super_admin", "school_admin"):
+        raise HTTPException(403, "Admin access required")
     try:
         count_res = sb.table("fluency_progress").select("student_id").execute()
         count = len(count_res.data or [])
@@ -2858,7 +2920,7 @@ def get_class_parent_reports(cid: str):
 
 # ── Test Assignments ───────────────────────────────────────
 @app.post("/assignments")
-def create_assignment(body: TestAssignmentBody):
+def create_assignment(body: TestAssignmentBody, _teacher: str = Depends(require_teacher)):
     try:
         t_res = sb.table("saved_tests").select("id,code,name,title").eq("id", body.testId).execute()
         if not t_res.data:
@@ -2939,7 +3001,7 @@ def _assignment_full(row: dict) -> dict:
 
 
 @app.get("/assignments")
-def list_assignments(classIds: Optional[str] = None):
+def list_assignments(classIds: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     try:
         q = sb.table("test_assignments").select("*")
         if classIds:
@@ -2988,7 +3050,7 @@ def get_student_assignment(student_id: str):
 
 
 @app.patch("/assignments/{aid}/students")
-def update_assignment_students(aid: str, body: dict):
+def update_assignment_students(aid: str, body: dict, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("test_assignments").select("id").eq("id", aid).execute()
         if not res.data:
@@ -3022,7 +3084,7 @@ def complete_assignment(aid: str, body: dict):
 
 
 @app.patch("/assignments/{aid}/reopen")
-def reopen_assignment(aid: str, body: dict):
+def reopen_assignment(aid: str, body: dict, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("test_assignments").select("id").eq("id", aid).execute()
         if not res.data:
@@ -3038,7 +3100,7 @@ def reopen_assignment(aid: str, body: dict):
 
 
 @app.patch("/assignments/{aid}/students/add")
-def add_students_to_assignment(aid: str, body: dict):
+def add_students_to_assignment(aid: str, body: dict, _teacher: str = Depends(require_teacher)):
     """Add new students to an existing assignment without resetting completed status."""
     try:
         res = sb.table("test_assignments").select("id").eq("id", aid).execute()
@@ -3106,7 +3168,7 @@ def give_makeup(aid: str, body: dict):
 
 
 @app.delete("/assignments/{aid}")
-def delete_assignment(aid: str):
+def delete_assignment(aid: str, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("test_assignments").select("id").eq("id", aid).execute()
         if not res.data:
