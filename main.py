@@ -46,8 +46,8 @@ ALLOWED_ORIGINS = os.environ.get(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ── In-memory state (intentionally NOT persisted to DB) ───
@@ -459,7 +459,7 @@ def _get_roster(class_ids=None) -> list:
             students_by_class.setdefault(s["class_id"], []).append(_db_student_to_api(s))
         return [_db_class_to_api(cls, students_by_class.get(cls["id"], [])) for cls in classes]
     except Exception as e:
-        raise HTTPException(500, f"DB error fetching roster: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 def _get_teachers() -> list:
@@ -480,7 +480,7 @@ def _get_teachers() -> list:
             })
         return result
     except Exception as e:
-        raise HTTPException(500, f"DB error fetching teachers: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Models ─────────────────────────────────────────────────
@@ -707,7 +707,8 @@ def check_attempt(code: str, studentId: str = "", studentName: str = ""):
         res = q.execute()
         return {"attempted": bool(res.data)}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/sessions")
@@ -751,7 +752,8 @@ def get_sessions(classIds: Optional[str] = None,
                 pass
         return sessions
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/student/history/{student_id}")
@@ -762,7 +764,8 @@ def get_student_history(student_id: str):
         ).execute()
         return [_db_session_to_api(r) for r in (res.data or [])]
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/sessions/class/{cid}")
@@ -783,7 +786,8 @@ def clear_class_sessions(cid: str, _teacher: str = Depends(require_teacher)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/sessions/test/{code}")
@@ -795,7 +799,8 @@ def delete_sessions_by_test(code: str, _teacher: str = Depends(require_teacher))
         sb.table("test_sessions").delete().eq("test_code", code_upper).execute()
         return {"ok": True, "removed": before}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/test/review/{code}")
@@ -868,7 +873,8 @@ def get_test_review(code: str, classId: Optional[str] = None, classIds: Optional
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/sessions")
@@ -893,7 +899,8 @@ def clear_sessions(mode: Optional[str] = None, _teacher: str = Depends(require_t
         dq.execute()
         return {"ok": True, "removed": before}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/heartbeat")
@@ -953,7 +960,8 @@ def save_draft(body: dict):
         sb.table("session_drafts").upsert(row, on_conflict="student_id,test_code").execute()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/sessions/draft/{student_id}/{test_code}")
@@ -965,7 +973,8 @@ def get_draft(student_id: str, test_code: str):
                 .maybe_single().execute()
         return res.data or {}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/sessions/draft/{student_id}/{test_code}")
@@ -976,7 +985,8 @@ def delete_draft(student_id: str, test_code: str):
             .eq("test_code", test_code.upper()).execute()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Test Control (per-code session management) ─────────────
@@ -1065,7 +1075,8 @@ def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
         res = q.execute()
         return [_db_question_to_api(r) for r in (res.data or [])]
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/questions")
@@ -1084,7 +1095,8 @@ def save_question(q: Question, _teacher: str = Depends(require_teacher)):
             sb.table("questions").insert(row).execute()
         return {"ok": True, "id": data["id"]}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/questions/{qid}")
@@ -1095,7 +1107,8 @@ def delete_question(qid: str, _teacher: str = Depends(require_teacher)):
         sb.table("questions").delete().eq("id", qid).execute()
         return {"ok": True, "removed": before}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/questions/{question_id}/regrade")
@@ -1104,7 +1117,8 @@ def regrade_question(question_id: str, body: RegradeBody, _teacher: str = Depend
     try:
         q_res = sb.table("questions").select("*").eq("id", question_id).execute()
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
     if not q_res.data:
         raise HTTPException(404, f"Question {question_id} not found")
     # For multiselect the correct answers live in the "answer" column;
@@ -1116,12 +1130,12 @@ def regrade_question(question_id: str, body: RegradeBody, _teacher: str = Depend
     try:
         sb.table("questions").update(update_fields).eq("id", question_id).execute()
     except Exception as e:
-        raise HTTPException(500, f"DB error updating question: {e}")
+        raise HTTPException(500, "Internal server error")
     try:
         sess_res = sb.table("test_sessions").select("id,test_code,answers,score,total").execute()
         all_sessions = sess_res.data or []
     except Exception as e:
-        raise HTTPException(500, f"DB error fetching sessions: {e}")
+        raise HTTPException(500, "Internal server error")
     affected = [s for s in all_sessions if question_id in (_parse_jsonb(s.get("answers"), {}) or {})]
     updated_count = 0
     for sess in affected:
@@ -1194,7 +1208,8 @@ def get_test_by_code(code: str):
             "closeDate":      match.get("close_date"),
         }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Saved Tests ────────────────────────────────────────────
@@ -1204,22 +1219,25 @@ def get_saved_tests(teacherId: Optional[str] = None, showArchived: bool = False,
     info = _get_teacher_info(teacher_email) if teacher_email else {"id": teacherId, "role": "teacher"}
     is_admin = info["role"] in ("super_admin", "school_admin")
     try:
-        res = sb.table("saved_tests").select("*").execute()
+        q = sb.table("saved_tests").select("*")
+        if not showArchived:
+            q = q.eq("archived", False)
+        res = q.execute()
         rows = res.data or []
+
+        eff_teacher_id = info["id"] or teacherId
 
         def visible(t):
             cb  = t.get("created_by", "")
             vis = t.get("visibility", "private")
             if is_admin: return True
             if not cb: return True
-            if cb == teacherId: return True
-            if vis == "grade" and teacherId in (t.get("shared_with") or []): return True
+            if cb == eff_teacher_id: return True
+            if vis == "grade" and eff_teacher_id in (t.get("shared_with") or []): return True
             if vis == "global": return True
             return False
 
-        filtered = [t for t in rows if not teacherId or visible(t)]
-        if not showArchived:
-            filtered = [t for t in filtered if not t.get("archived", False)]
+        filtered = [t for t in rows if not eff_teacher_id or visible(t)]
 
         if not filtered:
             return []
@@ -1273,7 +1291,8 @@ def get_saved_tests(teacherId: Optional[str] = None, showArchived: bool = False,
             })
         return result
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/tests/saved/{tid}")
@@ -1300,7 +1319,8 @@ def get_saved_test(tid: str, teacherId: Optional[str] = None,
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 def _upsert_test_questions(test_id: str, questions: list):
@@ -1323,7 +1343,7 @@ def _upsert_test_questions(test_id: str, questions: list):
         if rows:
             sb.table("test_questions").insert(rows).execute()
     except Exception as e:
-        raise HTTPException(500, f"DB error saving test questions: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 def _upsert_test_classes(test_id: str, class_ids: list):
@@ -1333,12 +1353,15 @@ def _upsert_test_classes(test_id: str, class_ids: list):
             rows = [{"test_id": test_id, "class_id": cid} for cid in class_ids]
             sb.table("test_classes").insert(rows).execute()
     except Exception as e:
-        raise HTTPException(500, f"DB error saving test classes: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/tests/saved")
-def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
+def save_test(test: SavedTest, teacher_email: str = Depends(require_teacher)):
     data = test.dict()
+    info = _get_teacher_info(teacher_email)
+    is_admin = info["role"] in ("super_admin", "school_admin")
+
     test_id = "t" + uuid.uuid4().hex[:8]
     saved_at = time.strftime("%b %d, %Y %I:%M %p")
     code = data.get("code", "")
@@ -1348,21 +1371,21 @@ def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[s
         code = code.strip().upper()
 
     try:
-        # Ensure unique code
-        existing_codes_res = sb.table("saved_tests").select("code").execute()
-        existing_codes = {r["code"] for r in (existing_codes_res.data or [])}
-        while code in existing_codes:
+        # Ensure unique code (targeted check, not full-table scan)
+        for _ in range(10):
+            res = sb.table("saved_tests").select("id").eq("code", code).limit(1).execute()
+            if not res.data:
+                break
             code = gen_code()
 
-        # Ownership
-        created_by = data.get("createdBy", "") or teacherId or ""
+        # Ownership — derive from token, not client param
+        created_by = info["id"] or data.get("createdBy", "")
         created_by_name = data.get("createdByName", "")
         if not created_by_name and created_by:
             t_res = sb.table("teachers").select("name").eq("id", created_by).execute()
             if t_res.data:
                 created_by_name = t_res.data[0].get("name", "")
 
-        is_admin = role in ("super_admin", "school_admin")
         visibility = data.get("visibility", "private")
         if not is_admin and visibility == "global":
             visibility = "private"
@@ -1392,17 +1415,26 @@ def save_test(test: SavedTest, teacherId: Optional[str] = None, role: Optional[s
             "saved_at":         saved_at,
         }
         sb.table("saved_tests").insert(row).execute()
-        _upsert_test_questions(test_id, data.get("questions", []))
-        _upsert_test_classes(test_id, data.get("classIds", []))
+        try:
+            _upsert_test_questions(test_id, data.get("questions", []))
+            _upsert_test_classes(test_id, data.get("classIds", []))
+        except Exception as e2:
+            # Clean up the orphaned test record if follow-up inserts fail
+            try: sb.table("saved_tests").delete().eq("id", test_id).execute()
+            except Exception: pass
+            raise e2
         return {"ok": True, "id": test_id, "code": code}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] save_test: {e}")
+        raise HTTPException(500, "Failed to save test")
 
 
 @app.put("/tests/saved/{tid}")
-def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None, role: Optional[str] = None, _teacher: str = Depends(require_teacher)):
+def update_saved_test(tid: str, test: SavedTest, teacher_email: str = Depends(require_teacher)):
+    info = _get_teacher_info(teacher_email)
+    is_admin = info["role"] in ("super_admin", "school_admin")
     try:
         res = sb.table("saved_tests").select("*").eq("id", tid).execute()
         if not res.data:
@@ -1415,9 +1447,8 @@ def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None
         if code_res.data:
             raise HTTPException(400, "Code already in use")
 
-        is_admin = role in ("super_admin", "school_admin")
         cb = t.get("created_by", "")
-        if cb and cb != teacherId and not is_admin:
+        if cb and cb != info["id"] and not is_admin:
             raise HTTPException(403, "Not authorized to edit this test")
 
         visibility = test.visibility or t.get("visibility", "private")
@@ -1447,7 +1478,8 @@ def update_saved_test(tid: str, test: SavedTest, teacherId: Optional[str] = None
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/tests/saved/{tid}/classes")
@@ -1461,7 +1493,8 @@ def set_test_classes(tid: str, body: dict, _teacher: str = Depends(require_teach
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/tests/saved/{tid}/archive")
@@ -1482,7 +1515,8 @@ def archive_test(tid: str, body: dict, teacher_email: str = Depends(require_teac
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/tests/saved/{tid}")
@@ -1510,7 +1544,8 @@ def delete_saved_test(tid: str, teacher_email: str = Depends(require_teacher)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Bulk seed ──────────────────────────────────────────────
@@ -1552,7 +1587,8 @@ def seed_questions(questions_in: List[Any] = fastapi.Body(...), _teacher: str = 
             "duplicate_count": len(skipped_duplicate),
         }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Roster ─────────────────────────────────────────────────
@@ -1581,7 +1617,8 @@ def get_class(cid: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/roster/class")
@@ -1614,7 +1651,8 @@ def create_class(body: NewClass, _teacher: str = Depends(require_teacher)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.put("/roster/class/{cid}")
@@ -1661,7 +1699,8 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/roster/class/{cid}")
@@ -1673,7 +1712,8 @@ def delete_class(cid: str, _teacher: str = Depends(require_teacher)):
         sb.table("classes").delete().eq("id", cid).execute()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/roster/class/{cid}/students")
@@ -1707,7 +1747,8 @@ def add_students(cid: str, body: AddStudents, _teacher: str = Depends(require_te
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/roster/class/{cid}/student/{sid}")
@@ -1726,7 +1767,8 @@ def remove_student(cid: str, sid: str, _teacher: str = Depends(require_teacher))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Admin analytics ────────────────────────────────────────
@@ -1793,7 +1835,8 @@ def admin_overview():
             "totalSessions":  len(all_sessions),
         }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/admin/fix-fluency-sessions")
@@ -1890,7 +1933,8 @@ def export_database(request: Request):
                 export["tables"][table] = {"error": str(te)}
         return export
     except Exception as e:
-        raise HTTPException(500, f"Export error: {e}")
+        print(f"[ERROR] export: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Teacher accounts ───────────────────────────────────────
@@ -1929,7 +1973,8 @@ def create_teacher(body: NewTeacher, teacher_email: str = Depends(require_teache
             sb.table("teacher_classes").insert(rows).execute()
         return {"ok": True, "id": tid}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.put("/teachers/{tid}")
@@ -1953,7 +1998,8 @@ def update_teacher(tid: str, body: NewTeacher, _teacher: str = Depends(require_t
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/teachers/{tid}")
@@ -1963,7 +2009,8 @@ def delete_teacher(tid: str, _teacher: str = Depends(require_teacher)):
         sb.table("teachers").delete().eq("id", tid).execute()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.put("/teachers/{tid}/classes")
@@ -1980,7 +2027,8 @@ def set_teacher_classes(tid: str, body: AddStudents):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Google OAuth ───────────────────────────────────────────
@@ -2025,7 +2073,8 @@ def google_teacher_verify(body: GoogleVerifyBody):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 def _match_student_db(info: dict, classes_to_search: list):
@@ -2087,7 +2136,8 @@ def google_verify(body: GoogleVerifyBody):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/auth/google/enroll")
@@ -2140,7 +2190,8 @@ def google_enroll(body: EnrollBody):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/auth/google/drill")
@@ -2177,7 +2228,8 @@ def google_drill_auth(body: GoogleVerifyBody):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Fluency Drills ─────────────────────────────────────────
@@ -2236,7 +2288,8 @@ def get_fluency_progress(student_id: str):
             "sessions":      sessions_out,
         }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/fluency/session")
@@ -2352,7 +2405,8 @@ def save_fluency_session(session: FluencySession):
             "streak":         streak,
         }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/fluency/class/{cid}/report")
@@ -2441,7 +2495,8 @@ def get_fluency_class_report(cid: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/fluency/class/{cid}/leaderboard")
@@ -2488,7 +2543,8 @@ def get_fluency_leaderboard(cid: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/fluency/student/{student_id}")
@@ -2503,7 +2559,8 @@ def reset_fluency_student(student_id: str, _teacher: str = Depends(require_teach
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/fluency/class/{cid}")
@@ -2526,7 +2583,8 @@ def reset_fluency_class(cid: str, _teacher: str = Depends(require_teacher)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/fluency/all")
@@ -2541,7 +2599,8 @@ def reset_fluency_all(teacher_email: str = Depends(require_teacher)):
         sb.table("fluency_progress").delete().neq("student_id", "").execute()
         return {"ok": True, "message": f"All fluency data cleared ({count} students)"}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Student Diagnostic ─────────────────────────────────────
@@ -2552,7 +2611,8 @@ def get_student_diagnosis(student_id: str):
         sess_res = sb.table("test_sessions").select("*").eq("student_id", student_id).eq("mode", "test").execute()
         student_sessions = [_db_session_to_api(r) for r in (sess_res.data or [])]
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
     if not student_sessions:
         return {
@@ -2734,7 +2794,8 @@ def get_parent_report(student_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
     pb = {
         "bestAccuracy": d.get("best_accuracy", 0),
@@ -2915,7 +2976,8 @@ def get_class_parent_reports(cid: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Test Assignments ───────────────────────────────────────
@@ -2971,7 +3033,8 @@ def create_assignment(body: TestAssignmentBody, _teacher: str = Depends(require_
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 def _assignment_full(row: dict) -> dict:
@@ -3011,7 +3074,8 @@ def list_assignments(classIds: Optional[str] = None, _teacher: str = Depends(req
         res = q.execute()
         return [_assignment_full(r) for r in (res.data or [])]
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/assignments/student/{student_id}")
@@ -3046,7 +3110,8 @@ def get_student_assignment(student_id: str):
             })
         return {"assignments": active}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/assignments/{aid}/students")
@@ -3064,7 +3129,8 @@ def update_assignment_students(aid: str, body: dict, _teacher: str = Depends(req
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/assignments/{aid}/complete")
@@ -3080,7 +3146,8 @@ def complete_assignment(aid: str, body: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/assignments/{aid}/reopen")
@@ -3096,7 +3163,8 @@ def reopen_assignment(aid: str, body: dict, _teacher: str = Depends(require_teac
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/assignments/{aid}/students/add")
@@ -3119,7 +3187,8 @@ def add_students_to_assignment(aid: str, body: dict, _teacher: str = Depends(req
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.patch("/assignments/{aid}/makeup")
@@ -3164,7 +3233,8 @@ def give_makeup(aid: str, body: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.delete("/assignments/{aid}")
@@ -3179,7 +3249,8 @@ def delete_assignment(aid: str, _teacher: str = Depends(require_teacher)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 if __name__ == "__main__":
