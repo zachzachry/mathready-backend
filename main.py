@@ -872,7 +872,7 @@ def get_test_review(code: str, classId: Optional[str] = None, classIds: Optional
 
 
 @app.delete("/sessions")
-def clear_sessions(mode: Optional[str] = None):
+def clear_sessions(mode: Optional[str] = None, _teacher: str = Depends(require_teacher)):
     try:
         q = sb.table("test_sessions").select("id")
         if mode == "tests":
