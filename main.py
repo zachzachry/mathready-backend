@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any
 import time, json, os, uuid, random, string, hmac, hashlib, base64
 from datetime import datetime, timezone
@@ -72,7 +72,10 @@ teacher_sessions: dict = {}  # token → teacher email (in-memory cache)
 # the service role key (a stable, pre-existing secret).
 
 def _token_secret() -> bytes:
-    return (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "mr_fallback_secret").encode()
+    secret = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not secret:
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is not set — cannot sign tokens")
+    return secret.encode()
 
 def _make_teacher_token(email: str) -> str:
     sig = hmac.new(_token_secret(), email.lower().encode(), hashlib.sha256).hexdigest()
@@ -329,6 +332,7 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "hideTimer":     row.get("hide_timer", True),
         "drillDuration": row.get("drill_duration", 180),
         "joinCode":      row.get("join_code", ""),
+        "practiceOpen":  row.get("practice_open", True),
         "students":      students if students is not None else [],
     }
 
@@ -485,28 +489,59 @@ def _get_teachers() -> list:
 
 # ── Models ─────────────────────────────────────────────────
 class Session(BaseModel):
-    studentId:    Optional[str] = ""
-    studentName:  str
-    classId:      Optional[str] = ""
-    className:    Optional[str] = ""
-    testCode:     Optional[str] = ""
-    testTitle:    Optional[str] = ""
-    score:        int
-    total:        int
-    pct:          int
-    submitted:    str
-    timeUsed:     str
-    answers:      dict
-    violations:   Optional[int] = 0
-    violationLog: Optional[list] = []
-    mode:         Optional[str] = "test"
-    questionTimes:Optional[list] = []
+    studentId:    Optional[str] = Field("",      max_length=128)
+    studentName:  str           = Field(...,     max_length=200)
+    classId:      Optional[str] = Field("",      max_length=128)
+    className:    Optional[str] = Field("",      max_length=200)
+    testCode:     Optional[str] = Field("",      max_length=20)
+    testTitle:    Optional[str] = Field("",      max_length=300)
+    score:        int           = Field(...,     ge=0,  le=10000)
+    total:        int           = Field(...,     ge=1,  le=10000)
+    pct:          int           = Field(...,     ge=0,  le=100)
+    submitted:    str           = Field(...,     max_length=50)
+    timeUsed:     str           = Field(...,     max_length=20)
+    answers:      dict          = Field(default_factory=dict)
+    violations:   Optional[int] = Field(0,       ge=0,  le=10000)
+    violationLog: Optional[list]= Field(default_factory=list, max_length=100)
+    mode:         Optional[str] = Field("test",  max_length=20)
+    questionTimes:Optional[list]= Field(default_factory=list, max_length=500)
+
+
+class DraftBody(BaseModel):
+    studentId:  str  = Field(..., max_length=128)
+    testCode:   str  = Field(..., max_length=20)
+    answers:    dict = Field(default_factory=dict)
+    cur:        int  = Field(0, ge=0, le=10000)
+    flags:      dict = Field(default_factory=dict)
+    endTime:    Optional[float] = None
+
+
+class ControlBody(BaseModel):
+    code:    str           = Field(..., max_length=20)
+    action:  Optional[str] = Field(None, max_length=50)
+    classId: Optional[str] = Field("",   max_length=128)
+    paused:  Optional[bool] = None
+    stopped: Optional[bool] = None
+
+
+class ExtendBody(BaseModel):
+    code:        Optional[str] = Field("", max_length=20)
+    studentName: str           = Field(..., max_length=200)
+    extraSecs:   int           = Field(..., ge=1, le=3600)
+
+
+class ArchiveBody(BaseModel):
+    archived: bool = True
+
+
+class ClassesBody(BaseModel):
+    classIds: list = Field(default_factory=list, max_length=50)
 
 class Heartbeat(BaseModel):
-    name:    str
-    current: int
-    code:    Optional[str] = ""
-    phase:   Optional[str] = "testing"
+    name:    str           = Field(..., max_length=200)
+    current: int           = Field(..., ge=0, le=10000)
+    code:    Optional[str] = Field("", max_length=20)
+    phase:   Optional[str] = Field("testing", max_length=50)
 
 class Question(BaseModel):
     id:            Optional[str] = None
@@ -572,7 +607,7 @@ class NewClass(BaseModel):
     gcCourseId: Optional[str] = None
 
 class AddStudents(BaseModel):
-    students: List[Any]
+    students: List[str] = Field(default_factory=list, max_length=1000)
 
 class NewTeacher(BaseModel):
     name: str
@@ -586,6 +621,7 @@ class UpdateClass(BaseModel):
     gcCourseId:    Optional[str] = None
     hideTimer:     Optional[bool] = None
     drillDuration: Optional[int] = None
+    practiceOpen:  Optional[bool] = None
 
 class GoogleVerifyBody(BaseModel):
     token:   str
@@ -597,7 +633,7 @@ class EnrollBody(BaseModel):
     joinCode: str
 
 class RegradeBody(BaseModel):
-    correct: Any
+    correct: str = Field(..., max_length=500)
 
 
 # ── Health ─────────────────────────────────────────────────
@@ -667,7 +703,8 @@ def submit_session(session: Session):
     try:
         sb.table("test_sessions").insert(row).execute()
     except Exception as e:
-        raise HTTPException(500, f"Failed to save session: {e}")
+        print(f"[ERROR] Failed to save session: {e}")
+        raise HTTPException(500, "Internal server error")
 
     # Delete in-progress draft now that session is submitted
     sid  = d.get("studentId", "")
@@ -759,10 +796,15 @@ def get_sessions(classIds: Optional[str] = None,
 @app.get("/student/history/{student_id}")
 def get_student_history(student_id: str):
     try:
-        res = sb.table("test_sessions").select("*").or_(
-            f"student_id.eq.{student_id},student_name.eq.{student_id}"
-        ).execute()
-        return [_db_session_to_api(r) for r in (res.data or [])]
+        by_id   = sb.table("test_sessions").select("*").eq("student_id",   student_id).execute()
+        by_name = sb.table("test_sessions").select("*").eq("student_name", student_id).execute()
+        seen = set()
+        rows = []
+        for r in (by_id.data or []) + (by_name.data or []):
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                rows.append(r)
+        return [_db_session_to_api(r) for r in rows]
     except Exception as e:
         print(f"[ERROR] {e}")
         raise HTTPException(500, "Internal server error")
@@ -804,7 +846,7 @@ def delete_sessions_by_test(code: str, _teacher: str = Depends(require_teacher))
 
 
 @app.get("/test/review/{code}")
-def get_test_review(code: str, classId: Optional[str] = None, classIds: Optional[str] = None):
+def get_test_review(code: str, classId: Optional[str] = None, classIds: Optional[str] = None, teacher: str = Depends(require_teacher)):
     code_upper = code.strip().upper()
     try:
         t_res = sb.table("saved_tests").select("id,title,name").eq("code", code_upper).execute()
@@ -942,18 +984,18 @@ def get_active_students(code: str = ""):
 
 # ── Session Drafts (crash recovery / Chromebook reboot) ────
 @app.put("/sessions/draft")
-def save_draft(body: dict):
-    sid  = body.get("studentId", "")
-    code = body.get("testCode",  "").upper()
+def save_draft(body: DraftBody):
+    sid  = body.studentId
+    code = body.testCode.strip().upper()
     if not sid or not code:
         raise HTTPException(400, "studentId and testCode required")
     row = {
         "student_id": sid,
         "test_code":  code,
-        "answers":    body.get("answers", {}),
-        "cur":        body.get("cur", 0),
-        "flags":      body.get("flags", {}),
-        "end_time":   body.get("endTime"),   # Unix ms timestamp or null if untimed
+        "answers":    body.answers,
+        "cur":        body.cur,
+        "flags":      body.flags,
+        "end_time":   body.endTime,
         "updated_at": datetime.utcnow().isoformat(),
     }
     try:
@@ -1005,14 +1047,14 @@ def get_test_control(code: str = ""):
 
 
 @app.post("/test/control")
-def post_test_control(body: dict, teacher: str = Depends(require_teacher)):
-    code = body.get("code", "").strip().upper()
+def post_test_control(body: ControlBody, teacher: str = Depends(require_teacher)):
+    code = body.code.strip().upper()
     if not code:
         raise HTTPException(400, "code required")
-    action = body.get("action", "")
+    action = body.action or ""
 
     if action == "launch":
-        test_controls[code] = _default_control(body.get("classId", ""))
+        test_controls[code] = _default_control(body.classId or "")
         return test_controls[code]
 
     if action == "begin":
@@ -1033,20 +1075,20 @@ def post_test_control(body: dict, teacher: str = Depends(require_teacher)):
     if code not in test_controls:
         raise HTTPException(404, "No active session for this code. Launch first.")
     ctrl = test_controls[code]
-    if "paused"  in body: ctrl["paused"]  = bool(body["paused"])
-    if "stopped" in body: ctrl["stopped"] = bool(body["stopped"])
-    if body.get("stopped") == False and body.get("paused") == False:
+    if body.paused  is not None: ctrl["paused"]  = body.paused
+    if body.stopped is not None: ctrl["stopped"] = body.stopped
+    if body.stopped is False and body.paused is False:
         ctrl["extensions"] = {}
     return ctrl
 
 
 @app.post("/test/control/extend")
-def extend_student_time(body: dict, teacher: str = Depends(require_teacher)):
-    code  = body.get("code", "").strip().upper()
-    name  = body.get("studentName", "").strip()
-    extra = int(body.get("extraSecs", 0))
-    if not name or extra <= 0:
-        raise HTTPException(400, "studentName and extraSecs required")
+def extend_student_time(body: ExtendBody, teacher: str = Depends(require_teacher)):
+    code  = (body.code or "").strip().upper()
+    name  = body.studentName.strip()
+    extra = body.extraSecs
+    if not name:
+        raise HTTPException(400, "studentName required")
     if code and code not in test_controls:
         raise HTTPException(404, "No active session")
     ctrl = test_controls.get(code) or {}
@@ -1161,7 +1203,7 @@ def get_active_test():
     return active_test
 
 @app.post("/test/activate")
-def activate_test(test: ActiveTest):
+def activate_test(test: ActiveTest, teacher: str = Depends(require_teacher)):
     global active_test
     active_test = test.dict()
     return {"ok": True}
@@ -1327,17 +1369,19 @@ def _upsert_test_questions(test_id: str, questions: list):
     """Replace all test_questions rows for a test."""
     try:
         sb.table("test_questions").delete().eq("test_id", test_id).execute()
+        # Batch-check which question IDs exist in the bank (single query, no N+1)
+        q_dicts = [q if isinstance(q, dict) else q.dict() for q in questions]
+        bank_ids = {d["id"] for d in q_dicts if d.get("id")}
+        if bank_ids:
+            bres = sb.table("questions").select("id").in_("id", list(bank_ids)).execute()
+            found_ids = {r["id"] for r in (bres.data or [])}
+        else:
+            found_ids = set()
         rows = []
-        for pos, q in enumerate(questions):
-            q_dict = q if isinstance(q, dict) else q.dict()
+        for pos, q_dict in enumerate(q_dicts):
             qid = q_dict.get("id")
-            if qid:
-                # Check question exists in question bank
-                qres = sb.table("questions").select("id").eq("id", qid).execute()
-                if qres.data:
-                    rows.append({"test_id": test_id, "position": pos, "question_id": qid, "inline_data": None})
-                else:
-                    rows.append({"test_id": test_id, "position": pos, "question_id": None, "inline_data": q_dict})
+            if qid and qid in found_ids:
+                rows.append({"test_id": test_id, "position": pos, "question_id": qid, "inline_data": None})
             else:
                 rows.append({"test_id": test_id, "position": pos, "question_id": None, "inline_data": q_dict})
         if rows:
@@ -1483,12 +1527,12 @@ def update_saved_test(tid: str, test: SavedTest, teacher_email: str = Depends(re
 
 
 @app.patch("/tests/saved/{tid}/classes")
-def set_test_classes(tid: str, body: dict, _teacher: str = Depends(require_teacher)):
+def set_test_classes(tid: str, body: ClassesBody, _teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("saved_tests").select("id").eq("id", tid).execute()
         if not res.data:
             raise HTTPException(404, "Not found")
-        _upsert_test_classes(tid, body.get("classIds", []))
+        _upsert_test_classes(tid, body.classIds)
         return {"ok": True}
     except HTTPException:
         raise
@@ -1498,7 +1542,7 @@ def set_test_classes(tid: str, body: dict, _teacher: str = Depends(require_teach
 
 
 @app.patch("/tests/saved/{tid}/archive")
-def archive_test(tid: str, body: dict, teacher_email: str = Depends(require_teacher)):
+def archive_test(tid: str, body: ArchiveBody, teacher_email: str = Depends(require_teacher)):
     """Toggle archived status on a saved test."""
     try:
         res = sb.table("saved_tests").select("id,created_by").eq("id", tid).execute()
@@ -1509,7 +1553,7 @@ def archive_test(tid: str, body: dict, teacher_email: str = Depends(require_teac
         is_admin = info["role"] in ("super_admin", "school_admin")
         if t.get("created_by") and t["created_by"] != info["id"] and not is_admin:
             raise HTTPException(403, "Not authorized to archive this test")
-        archived = bool(body.get("archived", True))
+        archived = body.archived
         sb.table("saved_tests").update({"archived": archived}).eq("id", tid).execute()
         return {"ok": True, "archived": archived}
     except HTTPException:
@@ -1676,6 +1720,8 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
             updates["hide_timer"] = body.hideTimer
         if body.drillDuration is not None:
             updates["drill_duration"] = body.drillDuration
+        if body.practiceOpen is not None:
+            updates["practice_open"] = body.practiceOpen
         if updates:
             sb.table("classes").update(updates).eq("id", cid).execute()
 
@@ -1773,7 +1819,7 @@ def remove_student(cid: str, sid: str, _teacher: str = Depends(require_teacher))
 
 # ── Admin analytics ────────────────────────────────────────
 @app.get("/admin/overview")
-def admin_overview():
+def admin_overview(teacher: str = Depends(require_teacher)):
     try:
         roster = _get_roster()
         sess_res = sb.table("test_sessions").select("*").execute()
@@ -1895,7 +1941,8 @@ def fix_fluency_sessions(teacher_email: str = Depends(require_teacher)):
         return {"ok": True, "inserted": inserted,
                 "message": f"Migrated {inserted} fluency sessions from fluency_data.json"}
     except Exception as e:
-        raise HTTPException(500, f"Migration error: {e}")
+        print(f"[ERROR] Migration error: {e}")
+        raise HTTPException(500, "Internal server error")
 
 
 # ── Database Export / Backup ────────────────────────────────
@@ -2014,7 +2061,7 @@ def delete_teacher(tid: str, _teacher: str = Depends(require_teacher)):
 
 
 @app.put("/teachers/{tid}/classes")
-def set_teacher_classes(tid: str, body: AddStudents):
+def set_teacher_classes(tid: str, body: AddStudents, teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("teachers").select("id").eq("id", tid).execute()
         if not res.data:
@@ -2235,16 +2282,16 @@ def google_drill_auth(body: GoogleVerifyBody):
 # ── Fluency Drills ─────────────────────────────────────────
 
 class FluencySession(BaseModel):
-    studentId:     str
-    studentName:   str
-    classId:       Optional[str] = ""
-    className:     Optional[str] = ""
-    testCode:      Optional[str] = ""
+    studentId:     str            = Field(..., max_length=128)
+    studentName:   str            = Field(..., max_length=200)
+    classId:       Optional[str]  = Field("",  max_length=128)
+    className:     Optional[str]  = Field("",  max_length=200)
+    testCode:      Optional[str]  = Field("",  max_length=20)
     levels:        dict
-    log:           List[Any]
-    submitted:     Optional[str] = ""
-    stars:         Optional[int] = 0
-    drillDuration: Optional[int] = 180
+    log:           List[Any]      = Field(..., max_length=200)
+    submitted:     Optional[str]  = Field("",  max_length=50)
+    stars:         Optional[int]  = Field(0,   ge=0, le=5)
+    drillDuration: Optional[int]  = Field(180, ge=0, le=3600)
 
 
 def _get_fluency_progress(student_id: str) -> dict:
@@ -3082,17 +3129,29 @@ def list_assignments(classIds: Optional[str] = None, _teacher: str = Depends(req
 def get_student_assignment(student_id: str):
     try:
         as_res = sb.table("assignment_students").select("assignment_id,completed").eq("student_id", student_id).eq("completed", False).execute()
+        assignment_rows = as_res.data or []
+        if not assignment_rows:
+            return {"assignments": []}
+
+        # Batch fetch all test_assignments in one query
+        aid_list = [r["assignment_id"] for r in assignment_rows]
+        ta_res = sb.table("test_assignments").select("*").in_("id", aid_list).execute()
+        ta_by_id = {r["id"]: r for r in (ta_res.data or [])}
+
+        # Batch fetch all saved_tests in one query
+        test_ids = list({ta["test_id"] for ta in ta_by_id.values()})
+        tests_res = sb.table("saved_tests").select("*").in_("id", test_ids).execute() if test_ids else None
+        test_by_id = {r["id"]: r for r in (tests_res.data or [])} if tests_res else {}
+
         active = []
-        for row in (as_res.data or []):
+        for row in assignment_rows:
             aid = row["assignment_id"]
-            ta_res = sb.table("test_assignments").select("*").eq("id", aid).execute()
-            if not ta_res.data:
+            ta = ta_by_id.get(aid)
+            if not ta:
                 continue
-            ta = ta_res.data[0]
-            t_res = sb.table("saved_tests").select("*").eq("id", ta["test_id"]).execute()
-            if not t_res.data:
+            test = test_by_id.get(ta["test_id"])
+            if not test:
                 continue
-            test = t_res.data[0]
             questions = _get_test_questions(ta["test_id"])
             active.append({
                 "assignmentId":  aid,
@@ -3134,7 +3193,7 @@ def update_assignment_students(aid: str, body: dict, _teacher: str = Depends(req
 
 
 @app.patch("/assignments/{aid}/complete")
-def complete_assignment(aid: str, body: dict):
+def complete_assignment(aid: str, body: dict, teacher: str = Depends(require_teacher)):
     try:
         res = sb.table("test_assignments").select("id").eq("id", aid).execute()
         if not res.data:
