@@ -332,9 +332,10 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "hideTimer":     row.get("hide_timer", True),
         "drillDuration": row.get("drill_duration", 180),
         "joinCode":      row.get("join_code", ""),
-        "practiceOpen":  row.get("practice_open", True),
-        "periodEndTime": row.get("period_end_time"),
-        "students":      students if students is not None else [],
+        "practiceOpen":      row.get("practice_open", True),
+        "periodEndTime":     row.get("period_end_time"),
+        "practiceStandards": row.get("practice_standards") or [],
+        "students":          students if students is not None else [],
     }
 
 
@@ -624,13 +625,14 @@ class NewTeacher(BaseModel):
     classIds: Optional[List[str]] = []
 
 class UpdateClass(BaseModel):
-    name:            Optional[str] = None
-    students:        Optional[List[Any]] = None
-    gcCourseId:      Optional[str] = None
-    hideTimer:       Optional[bool] = None
-    drillDuration:   Optional[int] = None
-    practiceOpen:    Optional[bool] = None
-    periodEndTime:   Optional[str] = None  # "HH:MM" 24-hour format, e.g. "14:35"
+    name:              Optional[str] = None
+    students:          Optional[List[Any]] = None
+    gcCourseId:        Optional[str] = None
+    hideTimer:         Optional[bool] = None
+    drillDuration:     Optional[int] = None
+    practiceOpen:      Optional[bool] = None
+    periodEndTime:     Optional[str] = None  # "HH:MM" 24-hour format, e.g. "14:35"
+    practiceStandards: Optional[List[str]] = None  # e.g. ["FRA.DIV","FRA.MUL"]
 
 class GoogleVerifyBody(BaseModel):
     token:   str
@@ -1762,6 +1764,8 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
             updates["practice_open"] = body.practiceOpen
         if body.periodEndTime is not None:
             updates["period_end_time"] = body.periodEndTime if body.periodEndTime else None
+        if body.practiceStandards is not None:
+            updates["practice_standards"] = body.practiceStandards
         if updates:
             sb.table("classes").update(updates).eq("id", cid).execute()
 
