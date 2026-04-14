@@ -333,6 +333,7 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "drillDuration": row.get("drill_duration", 180),
         "joinCode":      row.get("join_code", ""),
         "practiceOpen":  row.get("practice_open", True),
+        "periodEndTime": row.get("period_end_time"),
         "students":      students if students is not None else [],
     }
 
@@ -360,6 +361,7 @@ def _db_saved_test_to_api(row: dict, questions: list = None) -> dict:
         "sharedWith":      row.get("shared_with") or [],
         "adminScoresOnly": row.get("admin_scores_only", False),
         "closeDate":       row.get("close_date"),
+        "psEntered":       row.get("ps_entered", False),
         "saved_at":        row.get("saved_at", ""),
         "archived":        row.get("archived", False),
         "classIds":        [],  # filled from test_classes join
@@ -386,6 +388,7 @@ def _db_session_to_api(row: dict) -> dict:
         "timeUsed":     row.get("time_used", ""),
         "violations":   row.get("violations", 0),
         "mode":         row.get("mode", "test"),
+        "inClass":      row.get("in_class", False),
         "answers":      _parse_jsonb(row.get("answers"), {}),
         "violationLog": _parse_jsonb(row.get("violation_log"), []),
         "questionTimes":_parse_jsonb(row.get("question_times"), []),
@@ -504,6 +507,7 @@ class Session(BaseModel):
     violations:   Optional[int] = Field(0,       ge=0,  le=10000)
     violationLog: Optional[list]= Field(default_factory=list, max_length=100)
     mode:         Optional[str] = Field("test",  max_length=20)
+    inClass:      Optional[bool]= Field(False)
     questionTimes:Optional[list]= Field(default_factory=list, max_length=500)
 
 
@@ -600,6 +604,10 @@ class SavedTest(BaseModel):
     closeDate:        Optional[str] = None
     shuffleQuestions: Optional[bool] = False
     shuffleChoices:   Optional[bool] = False
+    psEntered:        Optional[bool] = False
+
+class PsEnteredBody(BaseModel):
+    psEntered: bool
 
 class NewClass(BaseModel):
     name: str
@@ -616,12 +624,13 @@ class NewTeacher(BaseModel):
     classIds: Optional[List[str]] = []
 
 class UpdateClass(BaseModel):
-    name:          Optional[str] = None
-    students:      Optional[List[Any]] = None
-    gcCourseId:    Optional[str] = None
-    hideTimer:     Optional[bool] = None
-    drillDuration: Optional[int] = None
-    practiceOpen:  Optional[bool] = None
+    name:            Optional[str] = None
+    students:        Optional[List[Any]] = None
+    gcCourseId:      Optional[str] = None
+    hideTimer:       Optional[bool] = None
+    drillDuration:   Optional[int] = None
+    practiceOpen:    Optional[bool] = None
+    periodEndTime:   Optional[str] = None  # "HH:MM" 24-hour format, e.g. "14:35"
 
 class GoogleVerifyBody(BaseModel):
     token:   str
@@ -696,6 +705,7 @@ def submit_session(session: Session):
         "time_used":     d.get("timeUsed", ""),
         "violations":    d.get("violations", 0),
         "mode":          d.get("mode", "test"),
+        "in_class":      d.get("inClass", False),
         "answers":       d.get("answers", {}),
         "violation_log": d.get("violationLog", []),
         "question_times":d.get("questionTimes", []),
@@ -1137,8 +1147,8 @@ def save_question(q: Question, _teacher: str = Depends(require_teacher)):
             sb.table("questions").insert(row).execute()
         return {"ok": True, "id": data["id"]}
     except Exception as e:
-        print(f"[ERROR] {e}")
-        raise HTTPException(500, "Internal server error")
+        print(f"[ERROR save_question] {e}")
+        raise HTTPException(500, f"Could not save question: {e}")
 
 
 @app.delete("/questions/{qid}")
@@ -1235,6 +1245,7 @@ def get_test_by_code(code: str):
             "questions":      _strip_answers(questions),
             "title":          match.get("title", match.get("name", "")),
             "code":           code,
+            "subject":        match.get("subject", "math"),
             "adaptive":       match.get("adaptive", False),
             "type":           match.get("type", "test"),
             "drillStandards": match.get("drill_standards") or [],
@@ -1329,6 +1340,7 @@ def get_saved_tests(teacherId: Optional[str] = None, showArchived: bool = False,
                 "sharedWith":     t.get("shared_with") or [],
                 "adminScoresOnly":t.get("admin_scores_only", False),
                 "closeDate":      t.get("close_date"),
+                "psEntered":      t.get("ps_entered", False),
                 "archived":       t.get("archived", False),
             })
         return result
@@ -1554,8 +1566,34 @@ def archive_test(tid: str, body: ArchiveBody, teacher_email: str = Depends(requi
         if t.get("created_by") and t["created_by"] != info["id"] and not is_admin:
             raise HTTPException(403, "Not authorized to archive this test")
         archived = body.archived
+        # Block archiving tests that are currently assigned to students
+        if archived:
+            assign_res = sb.table("test_assignments").select("id").eq("test_id", tid).execute()
+            if assign_res.data:
+                raise HTTPException(400, "Cannot archive a test that is currently assigned to students")
         sb.table("saved_tests").update({"archived": archived}).eq("id", tid).execute()
         return {"ok": True, "archived": archived}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        raise HTTPException(500, "Internal server error")
+
+
+@app.patch("/tests/saved/{tid}/ps-entered")
+def mark_ps_entered(tid: str, body: PsEnteredBody, teacher_email: str = Depends(require_teacher)):
+    """Toggle PowerSchool-entered status on a saved test."""
+    try:
+        res = sb.table("saved_tests").select("id,created_by").eq("id", tid).execute()
+        if not res.data:
+            raise HTTPException(404, "Not found")
+        t = res.data[0]
+        info = _get_teacher_info(teacher_email)
+        is_admin = info["role"] in ("super_admin", "school_admin")
+        if t.get("created_by") and t["created_by"] != info["id"] and not is_admin:
+            raise HTTPException(403, "Not authorized")
+        sb.table("saved_tests").update({"ps_entered": body.psEntered}).eq("id", tid).execute()
+        return {"ok": True, "psEntered": body.psEntered}
     except HTTPException:
         raise
     except Exception as e:
@@ -1722,6 +1760,8 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
             updates["drill_duration"] = body.drillDuration
         if body.practiceOpen is not None:
             updates["practice_open"] = body.practiceOpen
+        if body.periodEndTime is not None:
+            updates["period_end_time"] = body.periodEndTime if body.periodEndTime else None
         if updates:
             sb.table("classes").update(updates).eq("id", cid).execute()
 
@@ -3161,6 +3201,7 @@ def get_student_assignment(student_id: str):
                 "className":     ta.get("class_name", ""),
                 "classId":       ta.get("class_id", ""),
                 "questions":     questions,
+                "subject":       test.get("subject", "math"),
                 "adaptive":      test.get("adaptive", False),
                 "untimed":       test.get("untimed", False),
                 "timeLimitSecs": test.get("time_limit_secs", 1800),
