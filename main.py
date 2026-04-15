@@ -333,6 +333,9 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "drillDuration": row.get("drill_duration", 180),
         "joinCode":      row.get("join_code", ""),
         "practiceOpen":      row.get("practice_open", True),
+        "muldivOpen":        row.get("muldiv_open",    True),
+        "fractionsOpen":     row.get("fractions_open", True),
+        "periodStartTime":   row.get("period_start_time"),
         "periodEndTime":     row.get("period_end_time"),
         "practiceStandards": row.get("practice_standards") or [],
         "students":          students if students is not None else [],
@@ -631,7 +634,10 @@ class UpdateClass(BaseModel):
     hideTimer:         Optional[bool] = None
     drillDuration:     Optional[int] = None
     practiceOpen:      Optional[bool] = None
-    periodEndTime:     Optional[str] = None  # "HH:MM" 24-hour format, e.g. "14:35"
+    muldivOpen:        Optional[bool] = None
+    fractionsOpen:     Optional[bool] = None
+    periodStartTime:   Optional[str] = None  # "HH:MM" 24-hour, e.g. "09:00"
+    periodEndTime:     Optional[str] = None  # "HH:MM" 24-hour, e.g. "14:35"
     practiceStandards: Optional[List[str]] = None  # e.g. ["FRA.DIV","FRA.MUL"]
 
 class GoogleVerifyBody(BaseModel):
@@ -1762,6 +1768,12 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
             updates["drill_duration"] = body.drillDuration
         if body.practiceOpen is not None:
             updates["practice_open"] = body.practiceOpen
+        if body.muldivOpen is not None:
+            updates["muldiv_open"] = body.muldivOpen
+        if body.fractionsOpen is not None:
+            updates["fractions_open"] = body.fractionsOpen
+        if body.periodStartTime is not None:
+            updates["period_start_time"] = body.periodStartTime if body.periodStartTime else None
         if body.periodEndTime is not None:
             updates["period_end_time"] = body.periodEndTime if body.periodEndTime else None
         if body.practiceStandards is not None:
