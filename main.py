@@ -676,9 +676,10 @@ def root():
 def submit_session(session: Session):
     d = session.dict()
 
-    # Enforce close date
+    # Enforce close date (skip for practice sessions — they have no window)
     code = d.get("testCode", "").upper()
-    if code:
+    is_practice = d.get("mode", "test") == "practice"
+    if code and not is_practice:
         try:
             tr = sb.table("saved_tests").select("close_date").eq("code", code).maybe_single().execute()
             if tr.data:
