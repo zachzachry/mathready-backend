@@ -149,7 +149,7 @@ def _is_qid(qid):
 
 def _next_question_id():
     try:
-        res = sb.table("questions").select("id").execute()
+        res = sb.table("questions").select("id").limit(50000).execute()
         existing = set()
         for row in (res.data or []):
             qid = row.get("id", "")
@@ -1127,7 +1127,7 @@ def get_all_sessions(teacher: str = Depends(require_teacher)):
 @app.get("/questions")
 def get_questions(standard: Optional[str] = None, dok: Optional[int] = None):
     try:
-        q = sb.table("questions").select("*")
+        q = sb.table("questions").select("*").limit(50000)
         if standard:
             q = q.like("standard", f"{standard}%")
         if dok:
@@ -3308,7 +3308,7 @@ def add_students_to_assignment(aid: str, body: dict, _teacher: str = Depends(req
 
 
 @app.patch("/assignments/{aid}/makeup")
-def give_makeup(aid: str, body: dict):
+def give_makeup(aid: str, body: dict, _teacher: str = Depends(require_teacher)):
     """One-click makeup: add a student and extend close date to end of today."""
     try:
         # Verify assignment exists
