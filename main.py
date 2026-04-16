@@ -306,8 +306,6 @@ def _api_question_to_db(data: dict) -> dict:
         "asset_type":     data.get("assetType"),
         "asset_reuse":    data.get("assetReuse"),
         "asset_size":     data.get("assetSize"),
-        "created_by":     data.get("createdBy", ""),
-        "created_by_name":data.get("createdByName", ""),
     }
 
 
