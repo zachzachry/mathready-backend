@@ -337,7 +337,9 @@ def _db_class_to_api(row: dict, students: list = None) -> dict:
         "fractionsOpen":     row.get("fractions_open", True),
         "periodStartTime":   row.get("period_start_time"),
         "periodEndTime":     row.get("period_end_time"),
-        "practiceStandards": row.get("practice_standards") or [],
+        "practiceStandards":    row.get("practice_standards") or [],
+        "practiceQuestionCount": row.get("practice_question_count", 20),
+        "practiceMasteryGoal":   row.get("practice_mastery_goal", 80),
         "students":          students if students is not None else [],
     }
 
@@ -638,7 +640,9 @@ class UpdateClass(BaseModel):
     fractionsOpen:     Optional[bool] = None
     periodStartTime:   Optional[str] = None  # "HH:MM" 24-hour, e.g. "09:00"
     periodEndTime:     Optional[str] = None  # "HH:MM" 24-hour, e.g. "14:35"
-    practiceStandards: Optional[List[str]] = None  # e.g. ["FRA.DIV","FRA.MUL"]
+    practiceStandards:    Optional[List[str]] = None  # e.g. ["FRA.DIV","FRA.MUL"]
+    practiceQuestionCount: Optional[int] = None
+    practiceMasteryGoal:   Optional[int] = None
 
 class GoogleVerifyBody(BaseModel):
     token:   str
@@ -1779,6 +1783,10 @@ def update_class(cid: str, body: UpdateClass, _teacher: str = Depends(require_te
             updates["period_end_time"] = body.periodEndTime if body.periodEndTime else None
         if body.practiceStandards is not None:
             updates["practice_standards"] = body.practiceStandards
+        if body.practiceQuestionCount is not None:
+            updates["practice_question_count"] = body.practiceQuestionCount
+        if body.practiceMasteryGoal is not None:
+            updates["practice_mastery_goal"] = max(70, min(100, body.practiceMasteryGoal))
         if updates:
             sb.table("classes").update(updates).eq("id", cid).execute()
 
